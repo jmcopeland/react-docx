@@ -484,7 +484,13 @@ export {
   type UseDocxBordersResult,
   type UseDocxLineSpacingResult,
   type UseDocxFormFieldsResult,
+  type UseDocxPageThumbnailsOptions,
+  type UseDocxPageThumbnailsResult,
   type UseDocxPageLayoutResult,
+  type DocxPageThumbnailItem,
+  type DocxPageThumbnailResolution,
+  type DocxPageThumbnailResolutionOptions,
+  type DocxPageThumbnailStatus,
   type UseDocxPaginationResult,
   type UseDocxParagraphStylesResult,
   type UseDocxTrackChangesResult,
@@ -495,11 +501,13 @@ export {
   useDocxImageWrapMenu,
   useDocxLineSpacing,
   useDocxFormFields,
+  useDocxPageThumbnails,
   useDocxPageLayout,
   useDocxPagination,
   useDocxParagraphStyles,
   useDocxTrackChanges,
   useDocxEditor,
+  resolveDocxPageThumbnailResolution,
   type UseDocxEditorOptions
 } from "./editor";
 

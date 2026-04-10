@@ -4,6 +4,8 @@ import {
   resolveFooterPaginationReservePx,
   resolveMeasuredBodyRenderedBottomPx,
   resolveMeasuredPageContentHeightPx,
+  resolvePageContentHeightPxForPageSegments,
+  resolveRenderPageContentHeightPxForPageSegments,
   stabilizeMeasuredPageContentHeights
 } from "../../packages/react-viewer/src/editor";
 
@@ -279,7 +281,7 @@ describe("footer pagination reserve", () => {
     ).toBe(808);
   });
 
-  it("shrinks the measured body budget further when rendered body content already overruns the footer", () => {
+  it("uses the visible body span even when rendered body content already overruns the footer", () => {
     expect(
       resolveMeasuredPageContentHeightPx({
         pageLayout: {
@@ -295,10 +297,10 @@ describe("footer pagination reserve", () => {
         bodyRenderedBottomPx: 970,
         footerTopPx: 960,
       })
-    ).toBe(798);
+    ).toBe(808);
   });
 
-  it("continues shrinking a measured page budget when the same page still overruns the footer", () => {
+  it("does not keep ratcheting down a measured page budget when the visible body span is unchanged", () => {
     expect(
       resolveMeasuredPageContentHeightPx({
         pageLayout: {
@@ -315,7 +317,7 @@ describe("footer pagination reserve", () => {
         bodyRenderedBottomPx: 970,
         footerTopPx: 960,
       })
-    ).toBe(780);
+    ).toBe(808);
   });
 
   it("does not shrink image-only body pages based on a sparse measured body bottom", () => {
@@ -376,6 +378,70 @@ describe("footer pagination reserve", () => {
         [900, 910, 905, 908]
       )
     ).toEqual([840, 844, 842, 908]);
+  });
+
+  it("allows measured heights to recover when the page segment identity changes", () => {
+    expect(
+      stabilizeMeasuredPageContentHeights(
+        [840, 844, 842],
+        [900, 910, 905],
+        {
+          currentPageIdentityKeys: ["page-a", "page-b", "page-c"],
+          nextPageIdentityKeys: ["page-a", "page-b-reshaped", "page-c"]
+        }
+      )
+    ).toEqual([840, 910, 842]);
+  });
+
+  it("ignores stale measured page heights when a different segment set now occupies the page", () => {
+    expect(
+      resolvePageContentHeightPxForPageSegments(
+        [
+          {
+            nodeIndex: 12
+          }
+        ],
+        0,
+        880,
+        [
+          {
+            startNodeIndex: 0,
+            pageContentWidthPx: 640,
+            pageContentHeightPx: 880,
+            pageContentHeightMultiplier: 1
+          }
+        ],
+        [620],
+        ["old-page-shape"],
+        "new-page-shape"
+      )
+    ).toBe(880);
+  });
+
+  it("ignores measured page heights during render when the chosen pagination plan is reserve-only", () => {
+    expect(
+      resolveRenderPageContentHeightPxForPageSegments({
+        pageSegments: [
+          {
+            nodeIndex: 12
+          }
+        ],
+        pageIndex: 0,
+        defaultPageContentHeightPx: 880,
+        metricsBySection: [
+          {
+            startNodeIndex: 0,
+            pageContentWidthPx: 640,
+            pageContentHeightPx: 880,
+            pageContentHeightMultiplier: 1
+          }
+        ],
+        measuredPageContentHeightsPxByPageIndex: [120],
+        measuredPageContentIdentityKeysByPageIndex: ["page-a"],
+        pageIdentityKey: "page-a",
+        useMeasuredPageContentHeights: false
+      })
+    ).toBe(880);
   });
 
 });

@@ -19,6 +19,7 @@ import {
   useDocxFormFields,
   useDocxLineSpacing,
   useDocxPageLayout,
+  useDocxPageThumbnails,
   useDocxPagination,
   useDocxParagraphStyles,
   useDocxTrackChanges
@@ -44,6 +45,7 @@ import {
   List,
   ListOrdered,
   Moon,
+  PanelsTopLeft,
   Redo2,
   Subscript,
   Superscript,
@@ -124,6 +126,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./components/ui/dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "./components/ui/sheet";
 import {
   HoverCard,
   HoverCardContent,
@@ -1379,6 +1388,10 @@ export function App(): React.JSX.Element {
   const { documentTheme, setDocumentTheme } = useDocxDocumentTheme(editor);
   const { layout: pageLayout } = useDocxPageLayout(editor);
   const { pagination } = useDocxPagination(editor);
+  const { thumbnails } = useDocxPageThumbnails(editor, {
+    maxWidthPx: 148,
+    pixelRatio: 2,
+  });
   const { paragraphStyles, selectedParagraphStyleId, setParagraphStyle } =
     useDocxParagraphStyles(editor);
   const { lineSpacing, setLineSpacing } = useDocxLineSpacing(editor);
@@ -1443,6 +1456,7 @@ export function App(): React.JSX.Element {
     () => pageLayout.viewportDefaults.zoomPercent
   );
   const [isReadOnly, setIsReadOnly] = React.useState(false);
+  const [thumbnailsSheetOpen, setThumbnailsSheetOpen] = React.useState(false);
   const [isParagraphStyleMenuOpen, setIsParagraphStyleMenuOpen] =
     React.useState(false);
   const [formWidgetDialogOpen, setFormWidgetDialogOpen] = React.useState(false);
@@ -1482,6 +1496,26 @@ export function App(): React.JSX.Element {
 
   React.useEffect(() => {
     setThemeReady(true);
+  }, []);
+
+  const scrollToPage = React.useCallback((pageIndex: number): void => {
+    const viewerScrollElement = viewerScrollRef.current;
+    if (!viewerScrollElement) {
+      return;
+    }
+
+    const targetPage = viewerScrollElement.querySelector<HTMLElement>(
+      `[data-docx-page-index="${Math.max(0, Math.round(pageIndex))}"]`
+    );
+    if (!targetPage) {
+      return;
+    }
+
+    targetPage.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+      inline: "nearest",
+    });
   }, []);
 
   React.useEffect(() => {
@@ -2599,6 +2633,13 @@ export function App(): React.JSX.Element {
                     Page {pagination.currentPage} / {pagination.totalPages}
                   </span>
                 </div>
+                <Button
+                  variant="outline"
+                  onClick={() => setThumbnailsSheetOpen(true)}
+                >
+                  <PanelsTopLeft />
+                  Pages
+                </Button>
               </ButtonGroup>
 
               <ButtonGroup>
@@ -2770,6 +2811,7 @@ export function App(): React.JSX.Element {
               <DocxEditorViewer
                 editor={editor}
                 pageGapBackgroundColor={pageGapBackgroundColor}
+                pageVirtualization={{ enabled: false }}
                 mode={isReadOnly ? "read-only" : "edit"}
                 showTrackedChanges={showTrackedChanges}
                 renderTrackedChangeCard={renderTrackedChangeCard}
@@ -2783,6 +2825,96 @@ export function App(): React.JSX.Element {
             </div>
           </div>
         </div>
+
+        <Sheet
+          open={thumbnailsSheetOpen}
+          onOpenChange={setThumbnailsSheetOpen}
+        >
+          <SheetContent side="right" className="w-[24rem] sm:max-w-[24rem]">
+            <SheetHeader className="pb-3">
+              <SheetTitle>Page Thumbnails</SheetTitle>
+              <SheetDescription>
+                Jump to any page from the live viewer surface.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+              <div className="grid gap-3">
+                {thumbnails.map((thumbnail) => {
+                  const rotatePreview =
+                    thumbnail.widthPx > thumbnail.heightPx;
+                  const previewWidthPx = rotatePreview
+                    ? thumbnail.heightPx
+                    : thumbnail.widthPx;
+                  const previewHeightPx = rotatePreview
+                    ? thumbnail.widthPx
+                    : thumbnail.heightPx;
+
+                  return (
+                    <button
+                      key={thumbnail.pageIndex}
+                      type="button"
+                      onClick={() => {
+                        scrollToPage(thumbnail.pageIndex);
+                        setThumbnailsSheetOpen(false);
+                      }}
+                      className="bg-card hover:bg-accent/60 border-border flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-colors"
+                    >
+                      <div className="flex min-w-10 flex-col items-center gap-1 pt-1">
+                        <span className="text-xs font-medium text-foreground">
+                          {thumbnail.pageNumber}
+                        </span>
+                        <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                          {thumbnail.status}
+                        </span>
+                      </div>
+
+                      <div className="flex min-w-0 flex-1 flex-col gap-2">
+                        <div className="bg-muted/60 ring-border/70 flex min-h-[10rem] items-center justify-center overflow-hidden rounded-md p-3 ring-1">
+                          <div
+                            style={{
+                              width: `${previewWidthPx}px`,
+                              height: `${previewHeightPx}px`,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <canvas
+                              ref={thumbnail.canvasRef}
+                              width={thumbnail.pixelWidthPx}
+                              height={thumbnail.pixelHeightPx}
+                              style={{
+                                width: `${thumbnail.widthPx}px`,
+                                height: `${thumbnail.heightPx}px`,
+                                display: "block",
+                                transform: rotatePreview
+                                  ? "rotate(90deg)"
+                                  : undefined,
+                                transformOrigin: "center center",
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                          <span>
+                            {Math.round(thumbnail.sourceWidthPx)} x{" "}
+                            {Math.round(thumbnail.sourceHeightPx)}
+                          </span>
+                          {!thumbnail.isMounted ? (
+                            <span>Not mounted</span>
+                          ) : thumbnail.error ? (
+                            <span>{thumbnail.error.message}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
 
         <Dialog
           open={formWidgetDialogOpen && Boolean(selectedFormField)}
