@@ -1,5 +1,11 @@
 # @extend-ai/react-docx
 
+## 0.5.0
+
+### Minor Changes
+
+- Expose DOCX page thumbnails with XLSX-style `paint` and `paintThumbnail` helpers, thumbnail size aliases, and `resolution` bounds compatibility.
+
 ## 0.4.0
 
 ### Minor Changes
