@@ -21,6 +21,10 @@ export const DEFAULT_MIN_PARAGRAPH_LINE_HEIGHT_PX = 14;
 const PARAGRAPH_SEGMENT_TOP_BLEED_PX = 22;
 const PARAGRAPH_SEGMENT_DESCENDER_BLEED_PX = 6;
 const PARAGRAPH_SEGMENT_VISUAL_SAFETY_PX = 24;
+const LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_RATIO = 0.18;
+const LAST_RENDERED_PAGE_BREAK_HINT_MIN_REMAINING_SPACE_PX =
+  DEFAULT_MIN_PARAGRAPH_LINE_HEIGHT_PX * 3;
+const LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_PX = 120;
 
 export interface TableRowRange {
   startRowIndex: number;
@@ -221,6 +225,75 @@ function normalizedPositivePixelValue(value: number | undefined, fallback: numbe
   }
 
   return Math.max(1, Math.round(value as number));
+}
+
+function shouldHonorParagraphStartLastRenderedPageBreak(params: {
+  pageConsumedHeightPx: number;
+  pageContentHeightPx: number;
+}): boolean {
+  const pageConsumedHeightPx = Math.max(
+    0,
+    Math.round(params.pageConsumedHeightPx)
+  );
+  const pageContentHeightPx = Math.max(
+    0,
+    Math.round(params.pageContentHeightPx)
+  );
+  if (pageConsumedHeightPx <= 0 || pageContentHeightPx <= 0) {
+    return false;
+  }
+
+  const remainingHeightPx = Math.max(
+    0,
+    pageContentHeightPx - pageConsumedHeightPx
+  );
+  const maxAllowedRemainingHeightPx = Math.max(
+    LAST_RENDERED_PAGE_BREAK_HINT_MIN_REMAINING_SPACE_PX,
+    Math.min(
+      LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_PX,
+      Math.round(
+        pageContentHeightPx *
+          LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_RATIO
+      )
+    )
+  );
+  return remainingHeightPx <= maxAllowedRemainingHeightPx;
+}
+
+function keepNextParagraphReservePx(
+  paragraph: ParagraphNode,
+  nextParagraph: ParagraphNode | undefined,
+  callbacks: PageSegmentationCallbacks,
+  docGridLinePitchPx?: number
+): number {
+  if (
+    paragraph.style?.keepNext !== true ||
+    !nextParagraph ||
+    !Number.isFinite(paragraph.style?.headingLevel)
+  ) {
+    return 0;
+  }
+
+  const nextParagraphText = nextParagraph.children
+    .filter((child): child is Extract<typeof child, { type: "text" }> => child.type === "text")
+    .map((child) => child.text)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    nextParagraph.style?.numbering === undefined &&
+    nextParagraphText.length < 80
+  ) {
+    return 0;
+  }
+
+  return Math.max(
+    nextParagraph.style?.numbering ? 10 : 6,
+    Math.round(
+      callbacks.estimateParagraphLineHeightPx(nextParagraph, docGridLinePitchPx) *
+        (nextParagraph.style?.numbering ? 1 : 0.5)
+    )
+  );
 }
 
 function normalizedMeasuredTableRowHeights(
@@ -487,6 +560,12 @@ export function collectDocxEstimatedOverflowBreakStartNodeIndexes(
           paragraphBeforeSpacingPx(nextChainNode)
         );
         requiredHeightPx += Math.max(1, nextRawHeightPx - collapsedChainMarginPx);
+        requiredHeightPx += keepNextParagraphReservePx(
+          currentChainNode,
+          nextChainNode,
+          callbacks,
+          chainMetrics.docGridLinePitchPx
+        );
         chainPreviousParagraphAfterPx = paragraphAfterSpacingPx(nextChainNode);
       }
     }
@@ -625,6 +704,10 @@ export function buildDocumentPageNodeSegments(
       if (
         preferLastRenderedParagraphStartBreaks &&
         paragraphStartsWithLastRenderedPageBreak(node) &&
+        shouldHonorParagraphStartLastRenderedPageBreak({
+          pageConsumedHeightPx,
+          pageContentHeightPx: currentPageContentHeightPx
+        }) &&
         currentPageSegments.length > 0
       ) {
         startNextPage();
@@ -884,6 +967,12 @@ export function buildDocumentPageNodeSegments(
             paragraphBeforeSpacingPx(nextChainNode)
           );
           requiredHeightPx += Math.max(1, nextRawHeightPx - collapsedChainMarginPx);
+          requiredHeightPx += keepNextParagraphReservePx(
+            currentChainNode,
+            nextChainNode,
+            callbacks,
+            chainMetrics.docGridLinePitchPx
+          );
           chainPreviousParagraphAfterPx = paragraphAfterSpacingPx(nextChainNode);
         }
       }

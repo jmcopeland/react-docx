@@ -3,7 +3,7 @@ import type { DocModel } from "@extend-ai/react-docx-doc-model";
 import { buildDocumentPageNodeSegments } from "../../packages/react-viewer/src/editor";
 
 describe("rendered page break pagination", () => {
-  it("prefers paragraph-start rendered page breaks during untouched viewer import pagination", () => {
+  it("ignores paragraph-start rendered page breaks when they would leave a large gap", () => {
     const model: DocModel = {
       nodes: [
         {
@@ -38,10 +38,7 @@ describe("rendered page break pagination", () => {
       }
     );
 
-    expect(pages).toEqual([
-      [{ nodeIndex: 0 }],
-      [{ nodeIndex: 1 }]
-    ]);
+    expect(pages).toEqual([[{ nodeIndex: 0 }, { nodeIndex: 1 }]]);
   });
 
   it("ignores a paragraph-start rendered break when the previous paragraph already ends with an explicit page break", () => {
@@ -140,7 +137,7 @@ describe("rendered page break pagination", () => {
     expect(pages).toEqual([[{ nodeIndex: 0 }], [{ nodeIndex: 1 }]]);
   });
 
-  it("does not strand formatting-only empty paragraphs on a blank page before a rendered page break", () => {
+  it("does not strand formatting-only empty paragraphs when a rendered page break hint is ignored", () => {
     const model: DocModel = {
       nodes: [
         {
@@ -188,6 +185,6 @@ describe("rendered page break pagination", () => {
       }
     );
 
-    expect(pages).toEqual([[{ nodeIndex: 0 }], [{ nodeIndex: 3 }]]);
+    expect(pages).toEqual([[{ nodeIndex: 0 }, { nodeIndex: 3 }]]);
   });
 });

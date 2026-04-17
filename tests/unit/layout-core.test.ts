@@ -651,7 +651,7 @@ describe("layout-core", () => {
     ]);
   });
 
-  it("prefers paragraph-start rendered page breaks for untouched import pagination", () => {
+  it("ignores rendered page break hints when they would leave a large gap", () => {
     const model: DocModel = {
       nodes: [
         {
@@ -677,7 +677,7 @@ describe("layout-core", () => {
 
     const pages = buildDocumentPageNodeSegments(
       model,
-      500,
+      700,
       400,
       TEST_PAGE_SEGMENTATION_CALLBACKS,
       undefined,
@@ -697,9 +697,7 @@ describe("layout-core", () => {
             totalLineCount: 4,
             lineHeightPx: 50
           }
-        }
-      ],
-      [
+        },
         {
           nodeIndex: 1,
           paragraphLineRange: {
@@ -846,6 +844,69 @@ describe("layout-core", () => {
       paragraphLineCountWithinWidth: () => 1,
       paragraphCanSplitAcrossPages: () => false,
       estimateTableRowHeightsPx: () => [30, 30]
+    };
+
+    const pages = buildDocumentPageNodeSegments(model, 120, 400, callbacks);
+    expect(pages).toEqual([
+      [{ nodeIndex: 0 }],
+      [
+        { nodeIndex: 1 },
+        { nodeIndex: 2 }
+      ]
+    ]);
+  });
+
+  it("pushes a keepNext heading to the next page when a numbered paragraph only fits without reserve", () => {
+    const model: DocModel = {
+      nodes: [
+        {
+          type: "paragraph",
+          children: [{ type: "text", text: "Body" }]
+        },
+        {
+          type: "paragraph",
+          style: {
+            keepNext: true,
+            headingLevel: 2
+          },
+          children: [{ type: "text", text: "Compensation" }]
+        },
+        {
+          type: "paragraph",
+          style: {
+            numbering: {
+              numId: 1,
+              level: 0
+            }
+          },
+          children: [{ type: "text", text: "1. Payment terms apply." }]
+        }
+      ],
+      metadata: {
+        sourceParts: 1,
+        warnings: [],
+        headerSections: [],
+        footerSections: [],
+        paragraphStyles: []
+      }
+    };
+
+    const callbacks = {
+      ...TEST_PAGE_SEGMENTATION_CALLBACKS,
+      estimateDocNodeHeightPx: (node: DocModel["nodes"][number]) =>
+        node.type === "paragraph" &&
+        node.children.some((child) => child.type === "text" && child.text === "Body")
+          ? 70
+          : 25,
+      estimateParagraphHeightPx: (
+        paragraph: Extract<DocModel["nodes"][number], { type: "paragraph" }>
+      ) =>
+        paragraph.children.some((child) => child.type === "text" && child.text === "Body")
+          ? 70
+          : 25,
+      estimateParagraphLineHeightPx: () => 12,
+      paragraphLineCountWithinWidth: () => 1,
+      paragraphCanSplitAcrossPages: () => false
     };
 
     const pages = buildDocumentPageNodeSegments(model, 120, 400, callbacks);

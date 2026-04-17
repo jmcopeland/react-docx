@@ -17,24 +17,54 @@ export function shouldAllowStoredPageCountReduction(options: {
   targetPageCount: number;
   hasLastRenderedPageBreakHints?: boolean;
   renderedBreakHintPageCount?: number;
+  hasMeasuredBodyFooterOverlap?: boolean;
 }): boolean {
-  const estimatedPageCount = Math.max(1, Math.round(options.estimatedPageCount));
+  const estimatedPageCount = Math.max(
+    1,
+    Math.round(options.estimatedPageCount)
+  );
   const targetPageCount = Math.max(1, Math.round(options.targetPageCount));
   if (targetPageCount >= estimatedPageCount) {
     return true;
+  }
+
+  if (options.hasMeasuredBodyFooterOverlap === true) {
+    return false;
   }
 
   if (options.hasLastRenderedPageBreakHints !== true) {
     return true;
   }
 
-  const renderedBreakHintPageCount = Number.isFinite(options.renderedBreakHintPageCount)
+  const renderedBreakHintPageCount = Number.isFinite(
+    options.renderedBreakHintPageCount
+  )
     ? Math.max(1, Math.round(options.renderedBreakHintPageCount as number))
     : undefined;
   return (
     renderedBreakHintPageCount !== undefined &&
     targetPageCount >= renderedBreakHintPageCount
   );
+}
+
+export function shouldLatchMeasuredBodyFooterOverlap(options: {
+  pageCount: number;
+  targetPageCount?: number;
+  measuredBodyFooterOverlap: boolean;
+}): boolean {
+  if (options.measuredBodyFooterOverlap !== true) {
+    return false;
+  }
+
+  const targetPageCount = Number.isFinite(options.targetPageCount)
+    ? Math.max(1, Math.round(options.targetPageCount as number))
+    : undefined;
+  if (targetPageCount === undefined) {
+    return false;
+  }
+
+  const pageCount = Math.max(1, Math.round(options.pageCount));
+  return pageCount <= targetPageCount;
 }
 
 function isBetterCandidate<TPage>(
@@ -54,7 +84,10 @@ function isBetterCandidate<TPage>(
     return candidateScaleDelta < incumbentScaleDelta;
   }
 
-  return candidate.pageCount === targetPageCount && incumbent.pageCount !== targetPageCount;
+  return (
+    candidate.pageCount === targetPageCount &&
+    incumbent.pageCount !== targetPageCount
+  );
 }
 
 export function reconcilePagesToTargetCountByScalingHeight<TPage>(
@@ -65,7 +98,7 @@ export function reconcilePagesToTargetCountByScalingHeight<TPage>(
     targetPageCount,
     buildPagesAtScale,
     maxDifference = 3,
-    scales: customScales
+    scales: customScales,
   } = options;
   const safeTargetPageCount = Math.max(1, Math.round(targetPageCount));
   const initialPageCount = initialPages.length;
@@ -77,7 +110,7 @@ export function reconcilePagesToTargetCountByScalingHeight<TPage>(
   const bestCandidate: PageCountCandidate<TPage> = {
     pageCount: initialPageCount,
     pages: initialPages,
-    scale: 1
+    scale: 1,
   };
   let selectedCandidate = bestCandidate;
   const needMorePages = initialPageCount < safeTargetPageCount;
@@ -85,20 +118,23 @@ export function reconcilePagesToTargetCountByScalingHeight<TPage>(
     customScales && customScales.length > 0
       ? customScales
       : needMorePages
-    ? [
-        0.98, 0.96, 0.94, 0.92, 0.9, 0.88, 0.86, 0.84, 0.82, 0.8,
-        0.78, 0.76, 0.74, 0.72, 0.7, 0.68, 0.66, 0.64, 0.62, 0.6,
-        0.58, 0.56, 0.54, 0.52, 0.5, 0.48, 0.46, 0.44, 0.42, 0.4,
-        0.38, 0.36, 0.34, 0.32, 0.3, 0.28, 0.26, 0.24, 0.22, 0.2
-      ]
-    : [1.02, 1.04, 1.06, 1.08, 1.1, 1.12, 1.14, 1.16, 1.18, 1.2, 1.22, 1.24, 1.26, 1.28, 1.3];
+      ? [
+          0.98, 0.96, 0.94, 0.92, 0.9, 0.88, 0.86, 0.84, 0.82, 0.8, 0.78, 0.76,
+          0.74, 0.72, 0.7, 0.68, 0.66, 0.64, 0.62, 0.6, 0.58, 0.56, 0.54, 0.52,
+          0.5, 0.48, 0.46, 0.44, 0.42, 0.4, 0.38, 0.36, 0.34, 0.32, 0.3, 0.28,
+          0.26, 0.24, 0.22, 0.2,
+        ]
+      : [
+          1.02, 1.04, 1.06, 1.08, 1.1, 1.12, 1.14, 1.16, 1.18, 1.2, 1.22, 1.24,
+          1.26, 1.28, 1.3,
+        ];
 
   for (const scale of scales) {
     const pages = buildPagesAtScale(scale);
     const candidate: PageCountCandidate<TPage> = {
       pageCount: pages.length,
       pages,
-      scale
+      scale,
     };
     if (isBetterCandidate(candidate, selectedCandidate, safeTargetPageCount)) {
       selectedCandidate = candidate;

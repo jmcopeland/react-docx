@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   reconcilePagesToTargetCountByScalingHeight,
-  shouldAllowStoredPageCountReduction
+  shouldLatchMeasuredBodyFooterOverlap,
+  shouldAllowStoredPageCountReduction,
 } from "../../packages/react-viewer/src/page-count-reconciliation";
 
 describe("page-count-reconciliation", () => {
@@ -18,7 +19,7 @@ describe("page-count-reconciliation", () => {
           return [["page-1"], ["page-2"]];
         }
         return initialPages;
-      }
+      },
     });
 
     expect(reconciled).toHaveLength(3);
@@ -37,7 +38,7 @@ describe("page-count-reconciliation", () => {
           return [["page-1"], ["page-2"]];
         }
         return initialPages;
-      }
+      },
     });
 
     expect(reconciled).toHaveLength(1);
@@ -48,7 +49,7 @@ describe("page-count-reconciliation", () => {
     const reconciled = reconcilePagesToTargetCountByScalingHeight({
       initialPages,
       targetPageCount: 10,
-      buildPagesAtScale: () => [["other-page"]]
+      buildPagesAtScale: () => [["other-page"]],
     });
 
     expect(reconciled).toBe(initialPages);
@@ -65,7 +66,7 @@ describe("page-count-reconciliation", () => {
           return [["page-1"], ["page-2"]];
         }
         return initialPages;
-      }
+      },
     });
 
     expect(reconciled).toEqual([["page-1"], ["page-2"]]);
@@ -77,7 +78,7 @@ describe("page-count-reconciliation", () => {
         estimatedPageCount: 4,
         targetPageCount: 3,
         hasLastRenderedPageBreakHints: true,
-        renderedBreakHintPageCount: 4
+        renderedBreakHintPageCount: 4,
       })
     ).toBe(false);
   });
@@ -88,7 +89,7 @@ describe("page-count-reconciliation", () => {
         estimatedPageCount: 3,
         targetPageCount: 2,
         hasLastRenderedPageBreakHints: true,
-        renderedBreakHintPageCount: 2
+        renderedBreakHintPageCount: 2,
       })
     ).toBe(true);
   });
@@ -98,7 +99,35 @@ describe("page-count-reconciliation", () => {
       shouldAllowStoredPageCountReduction({
         estimatedPageCount: 4,
         targetPageCount: 3,
-        hasLastRenderedPageBreakHints: false
+        hasLastRenderedPageBreakHints: false,
+      })
+    ).toBe(true);
+  });
+
+  it("does not reduce to a stored page count after live footer overlap is measured", () => {
+    expect(
+      shouldAllowStoredPageCountReduction({
+        estimatedPageCount: 3,
+        targetPageCount: 2,
+        hasMeasuredBodyFooterOverlap: true,
+      })
+    ).toBe(false);
+  });
+
+  it("only latches measured footer overlap once pagination is at or below the stored target", () => {
+    expect(
+      shouldLatchMeasuredBodyFooterOverlap({
+        pageCount: 7,
+        targetPageCount: 5,
+        measuredBodyFooterOverlap: true,
+      })
+    ).toBe(false);
+
+    expect(
+      shouldLatchMeasuredBodyFooterOverlap({
+        pageCount: 5,
+        targetPageCount: 5,
+        measuredBodyFooterOverlap: true,
       })
     ).toBe(true);
   });

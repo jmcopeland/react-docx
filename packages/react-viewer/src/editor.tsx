@@ -43,6 +43,7 @@ import {
 } from "./pagination-breaks";
 import {
   reconcilePagesToTargetCountByScalingHeight,
+  shouldLatchMeasuredBodyFooterOverlap,
   shouldAllowStoredPageCountReduction,
 } from "./page-count-reconciliation";
 import {
@@ -183,7 +184,7 @@ const DEFAULT_PARAGRAPH_LINE_MULTIPLE = 1;
 // Browser line box metrics run taller at single-spacing but converge by ~1.08.
 const WORD_SINGLE_LINE_AUTO_SCALE = 0.88;
 const WORD_SINGLE_LINE_AUTO_SCALE_SANS = 0.9;
-const WORD_SINGLE_LINE_AUTO_SCALE_SERIF = 1.12;
+const WORD_SINGLE_LINE_AUTO_SCALE_SERIF = 1.08;
 const WORD_AUTO_LINE_SCALE_BLEND_END_MULTIPLE = 1.08;
 const MIN_AUTO_LINE_MULTIPLE = 0.1;
 const MIN_PARAGRAPH_LINE_HEIGHT_PX = 14;
@@ -232,7 +233,10 @@ const LEADING_COVER_SPACER_EXTRA_HEIGHT_PX = 2;
 const PARAGRAPH_SEGMENT_TOP_BLEED_PX = 22;
 const PARAGRAPH_SEGMENT_DESCENDER_BLEED_PX = 6;
 const PARAGRAPH_SEGMENT_VISUAL_SAFETY_PX = 24;
-const EXPLICIT_COLUMN_BREAK_PAGINATION_FUZZ_PX = 32;
+const LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_RATIO = 0.18;
+const LAST_RENDERED_PAGE_BREAK_HINT_MIN_REMAINING_SPACE_PX =
+  MIN_PARAGRAPH_LINE_HEIGHT_PX * 3;
+const LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_PX = 120;
 const PARAGRAPH_SEGMENT_FALLBACK_TOP_BLEED_MAX_PX = 4;
 const PARAGRAPH_SEGMENT_FALLBACK_BOTTOM_BLEED_MAX_PX = 0;
 const PARAGRAPH_SEGMENT_FALLBACK_VISUAL_SAFETY_PX = 4;
@@ -4034,38 +4038,96 @@ function nodeTreeContainsExplicitFontFamily(
   });
 }
 
+function firstExplicitFontFamilyInNodeTree(
+  nodes: DocModel["nodes"] | HeaderSection["nodes"] | FooterSection["nodes"]
+): string | undefined {
+  for (const node of nodes) {
+    if (node.type === "paragraph") {
+      for (const child of node.children) {
+        if (child.type !== "text" && child.type !== "form-field") {
+          continue;
+        }
+
+        const fontFamily = child.style?.fontFamily?.trim();
+        if (fontFamily) {
+          return fontFamily;
+        }
+      }
+      continue;
+    }
+
+    if (node.type === "table") {
+      for (const row of node.rows) {
+        for (const cell of row.cells) {
+          const nestedFontFamily = firstExplicitFontFamilyInNodeTree(cell.nodes);
+          if (nestedFontFamily) {
+            return nestedFontFamily;
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function resolveDocumentInheritedFontFamily(
   model: DocModel
 ): string | undefined {
   const paragraphStyles = model.metadata.paragraphStyles ?? [];
-  const styleDefinesFontFamily = paragraphStyles.some((style) =>
+  const normalizedDefaultStyleId =
+    model.metadata.defaultParagraphStyleId?.trim().toLowerCase() ?? "";
+  const defaultParagraphStyle =
+    paragraphStyles.find(
+      (style) => style.id.trim().toLowerCase() === normalizedDefaultStyleId
+    ) ??
+    paragraphStyles.find((style) => style.isDefault) ??
+    paragraphStyles.find((style) => style.id.trim().toLowerCase() === "normal");
+  const defaultStyleFontFamily =
+    defaultParagraphStyle?.runStyle?.fontFamily?.trim();
+  if (defaultStyleFontFamily) {
+    return cssFontFamily(defaultStyleFontFamily);
+  }
+
+  const paragraphStyleFontFamily = paragraphStyles.find((style) =>
     Boolean(style.runStyle?.fontFamily?.trim())
-  );
-  if (styleDefinesFontFamily) {
-    return undefined;
+  )?.runStyle?.fontFamily;
+  if (paragraphStyleFontFamily) {
+    return cssFontFamily(paragraphStyleFontFamily);
   }
 
-  if (nodeTreeContainsExplicitFontFamily(model.nodes)) {
-    return undefined;
+  const explicitBodyFontFamily = firstExplicitFontFamilyInNodeTree(model.nodes);
+  if (explicitBodyFontFamily) {
+    return cssFontFamily(explicitBodyFontFamily);
   }
 
-  if (
+  for (const section of model.metadata.headerSections ?? []) {
+    const explicitHeaderFontFamily = firstExplicitFontFamilyInNodeTree(
+      section.nodes
+    );
+    if (explicitHeaderFontFamily) {
+      return cssFontFamily(explicitHeaderFontFamily);
+    }
+  }
+
+  for (const section of model.metadata.footerSections ?? []) {
+    const explicitFooterFontFamily = firstExplicitFontFamilyInNodeTree(
+      section.nodes
+    );
+    if (explicitFooterFontFamily) {
+      return cssFontFamily(explicitFooterFontFamily);
+    }
+  }
+
+  return nodeTreeContainsExplicitFontFamily(model.nodes) ||
     (model.metadata.headerSections ?? []).some((section) =>
       nodeTreeContainsExplicitFontFamily(section.nodes)
-    )
-  ) {
-    return undefined;
-  }
-
-  if (
+    ) ||
     (model.metadata.footerSections ?? []).some((section) =>
       nodeTreeContainsExplicitFontFamily(section.nodes)
     )
-  ) {
-    return undefined;
-  }
-
-  return cssFontFamily(DEFAULT_UNSPECIFIED_DOCX_FONT_FAMILY);
+    ? undefined
+    : cssFontFamily(DEFAULT_UNSPECIFIED_DOCX_FONT_FAMILY);
 }
 
 function replaceTabLayoutMarkersWithTabText(root: HTMLElement): void {
@@ -4683,6 +4745,12 @@ function sectionNodesNeedFullPageFooterOverlay(
 
 function paragraphHasFormField(paragraph: ParagraphNode): boolean {
   return paragraph.children.some((child) => child.type === "form-field");
+}
+
+function paragraphHasCheckboxFormField(paragraph: ParagraphNode): boolean {
+  return paragraph.children.some(
+    (child) => child.type === "form-field" && child.fieldType === "checkbox"
+  );
 }
 
 function paragraphHasVisibleText(paragraph: ParagraphNode): boolean {
@@ -5751,6 +5819,15 @@ function projectParagraphConsumedHeightWithExplicitColumnBreaks(
     },
     0
   );
+  const tallestSegmentLineHeightPx = paragraphSegments.reduce(
+    (tallest, segment) => {
+      return Math.max(
+        tallest,
+        estimateParagraphLineHeightPx(segment, docGridLinePitchPx)
+      );
+    },
+    MIN_PARAGRAPH_LINE_HEIGHT_PX
+  );
   const projectedConsumedHeightPx =
     normalizedParagraphStartPx +
     firstSegmentTopSpacingPx +
@@ -5772,10 +5849,7 @@ function projectParagraphConsumedHeightWithExplicitColumnBreaks(
   if (
     projectedConsumedHeightPx - pageConsumedHeightPx >
     remainingColumnHeightPx +
-      Math.max(
-        PAGE_OVERFLOW_TOLERANCE_PX,
-        EXPLICIT_COLUMN_BREAK_PAGINATION_FUZZ_PX
-      )
+      Math.max(PAGE_OVERFLOW_TOLERANCE_PX, tallestSegmentLineHeightPx)
   ) {
     return undefined;
   }
@@ -7077,6 +7151,37 @@ function paragraphStartsWithLastRenderedPageBreak(
   return leadingXml.length === 0;
 }
 
+function shouldHonorParagraphStartLastRenderedPageBreak(params: {
+  pageConsumedHeightPx: number;
+  pageContentHeightPx: number;
+}): boolean {
+  const pageConsumedHeightPx = Math.max(
+    0,
+    Math.round(params.pageConsumedHeightPx)
+  );
+  const pageContentHeightPx = Math.max(
+    0,
+    Math.round(params.pageContentHeightPx)
+  );
+  if (pageConsumedHeightPx <= 0 || pageContentHeightPx <= 0) {
+    return false;
+  }
+
+  const remainingHeightPx = Math.max(
+    0,
+    pageContentHeightPx - pageConsumedHeightPx
+  );
+  const maxAllowedRemainingHeightPx = clampNumber(
+    Math.round(
+      pageContentHeightPx *
+        LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_RATIO
+    ),
+    LAST_RENDERED_PAGE_BREAK_HINT_MIN_REMAINING_SPACE_PX,
+    LAST_RENDERED_PAGE_BREAK_HINT_MAX_REMAINING_SPACE_PX
+  );
+  return remainingHeightPx <= maxAllowedRemainingHeightPx;
+}
+
 function isOnOffTagEnabled(tagXml: string | undefined): boolean {
   if (!tagXml) {
     return false;
@@ -7723,6 +7828,16 @@ function singleLineAutoScaleForFontFamily(fontFamily?: string): number {
   }
 
   return WORD_SINGLE_LINE_AUTO_SCALE;
+}
+
+function resolveParagraphSingleLineAutoScale(
+  paragraph: ParagraphNode,
+  fontFamily?: string
+): number {
+  const baseScale = singleLineAutoScaleForFontFamily(fontFamily);
+  return paragraphHasCheckboxFormField(paragraph)
+    ? Math.max(1.08, baseScale)
+    : baseScale;
 }
 
 function paragraphLineCount(paragraph: ParagraphNode): number {
@@ -8638,12 +8753,9 @@ function autoLineHeightScaleForMultiple(
 ): number {
   const safeSingleLineScale = Math.max(
     MIN_AUTO_LINE_MULTIPLE,
-    Math.min(
-      1,
-      Number.isFinite(singleLineScale)
-        ? singleLineScale
-        : WORD_SINGLE_LINE_AUTO_SCALE
-    )
+    Number.isFinite(singleLineScale)
+      ? singleLineScale
+      : WORD_SINGLE_LINE_AUTO_SCALE
   );
   if (!Number.isFinite(multiple)) {
     return safeSingleLineScale;
@@ -8666,10 +8778,13 @@ function autoLineHeightScaleForMultiple(
 
 function calibrateAutoLineSpacingMultiple(
   multiple: number,
-  fontFamily?: string
+  fontFamily?: string,
+  singleLineScaleOverride?: number
 ): number {
   const normalizedMultiple = Math.max(MIN_AUTO_LINE_MULTIPLE, multiple);
-  const singleLineScale = singleLineAutoScaleForFontFamily(fontFamily);
+  const singleLineScale =
+    singleLineScaleOverride ??
+    singleLineAutoScaleForFontFamily(fontFamily);
   return Math.max(
     MIN_AUTO_LINE_MULTIPLE,
     Number(
@@ -8748,6 +8863,10 @@ export function estimateParagraphLineHeightPx(
   );
   const baseFontPx = paragraphBaseFontSizePx(paragraph);
   const baseFontFamily = paragraphDominantFontFamily(paragraph);
+  const singleLineScale = resolveParagraphSingleLineAutoScale(
+    paragraph,
+    baseFontFamily
+  );
   const defaultLineMultiple = isTableOfContentsParagraph(paragraph)
     ? 1.05
     : DEFAULT_PARAGRAPH_LINE_MULTIPLE;
@@ -8757,7 +8876,8 @@ export function estimateParagraphLineHeightPx(
       baseFontPx *
         calibrateAutoLineSpacingMultiple(
           DEFAULT_PARAGRAPH_LINE_MULTIPLE,
-          baseFontFamily
+          baseFontFamily,
+          singleLineScale
         )
     )
   );
@@ -8777,7 +8897,8 @@ export function estimateParagraphLineHeightPx(
 
   const multiple = calibrateAutoLineSpacingMultiple(
     resolveAutoLineSpacingMultiple(lineTwips, defaultLineMultiple),
-    baseFontFamily
+    baseFontFamily,
+    singleLineScale
   );
   const autoLineHeightPx = Math.max(1, Math.round(baseFontPx * multiple));
   const minimumReadableAutoLineHeightPx = paragraph.style?.numbering
@@ -9709,6 +9830,11 @@ function collectDocxEstimatedOverflowBreakStartNodeIndexes(
           1,
           nextRawHeightPx - collapsedChainMarginPx
         );
+        requiredHeightPx += keepNextPaginationReservePx(
+          currentChainNode,
+          nextChainNode,
+          chainMetrics.docGridLinePitchPx
+        );
         chainPreviousParagraphAfterPx = nextAfterSpacingPx;
       }
     }
@@ -10408,6 +10534,10 @@ export function buildDocumentPageNodeSegments(
       if (
         preferLastRenderedParagraphStartBreaks &&
         paragraphStartsWithLastRenderedPageBreak(node) &&
+        shouldHonorParagraphStartLastRenderedPageBreak({
+          pageConsumedHeightPx,
+          pageContentHeightPx: currentPageContentHeightPx,
+        }) &&
         (nodeMetrics.pageContentHeightMultiplier ?? 1) <= 1 &&
         !nodeAlreadyEndsAtExplicitPageBoundary(model.nodes[nodeIndex - 1]) &&
         currentPageSegments.length > 0
@@ -10840,6 +10970,11 @@ export function buildDocumentPageNodeSegments(
             1,
             nextRawHeightPx - collapsedChainMarginPx
           );
+          requiredHeightPx += keepNextPaginationReservePx(
+            currentChainNode,
+            nextChainNode,
+            chainMetrics.docGridLinePitchPx
+          );
           chainPreviousParagraphAfterPx = nextAfterSpacingPx;
         }
       }
@@ -11090,17 +11225,6 @@ export function buildDocumentPageNodeSegments(
         previousParagraphAfterPx = 0;
         rowStartIndex += 1;
         rowSliceOffsetPx = 0;
-
-        if (rowStartIndex < estimatedRowHeightsPx.length) {
-          startNextPage();
-          pageConsumedHeightPx = 0;
-          previousParagraphAfterPx = 0;
-          currentSectionPageFlowOriginPx = 0;
-          currentPageContentHeightPx = resolveMetricsPageContentHeightPx(
-            currentPageIndex,
-            nodeMetrics
-          );
-        }
         continue;
       }
 
@@ -12123,6 +12247,10 @@ function paragraphLineHeight(
   disableDocGridSnap = false
 ): number | string | undefined {
   const baseFontFamily = paragraphDominantFontFamily(paragraph);
+  const singleLineScale = resolveParagraphSingleLineAutoScale(
+    paragraph,
+    baseFontFamily
+  );
   const lineTwips = paragraph.style?.spacing?.lineTwips;
   const docGridMinimumLineHeightPx = resolveParagraphDocGridLinePitchPx(
     paragraph,
@@ -12139,7 +12267,8 @@ function paragraphLineHeight(
     }
     return calibrateAutoLineSpacingMultiple(
       DEFAULT_PARAGRAPH_LINE_MULTIPLE,
-      baseFontFamily
+      baseFontFamily,
+      singleLineScale
     );
   }
 
@@ -12157,7 +12286,8 @@ function paragraphLineHeight(
         lineTwips as number,
         DEFAULT_PARAGRAPH_LINE_MULTIPLE
       ),
-      baseFontFamily
+      baseFontFamily,
+      singleLineScale
     );
     return Number(lineMultiple.toFixed(3));
   }
@@ -12170,7 +12300,8 @@ function paragraphLineHeight(
         paragraphBaseFontSizePx(paragraph) *
           calibrateAutoLineSpacingMultiple(
             DEFAULT_PARAGRAPH_LINE_MULTIPLE,
-            baseFontFamily
+            baseFontFamily,
+            singleLineScale
           )
       )
     );
@@ -12188,13 +12319,47 @@ function paragraphLineHeight(
   if (lineRule === "exact") {
     return calibrateAutoLineSpacingMultiple(
       DEFAULT_PARAGRAPH_LINE_MULTIPLE,
-      baseFontFamily
+      baseFontFamily,
+      singleLineScale
     );
   }
 
   return calibrateAutoLineSpacingMultiple(
     DEFAULT_PARAGRAPH_LINE_MULTIPLE,
-    baseFontFamily
+    baseFontFamily,
+    singleLineScale
+  );
+}
+
+function keepNextPaginationReservePx(
+  paragraph: ParagraphNode,
+  nextParagraph: ParagraphNode | undefined,
+  docGridLinePitchPx?: number
+): number {
+  if (
+    paragraph.style?.keepNext !== true ||
+    !nextParagraph ||
+    !Number.isFinite(paragraph.style?.headingLevel)
+  ) {
+    return 0;
+  }
+
+  const nextParagraphText = paragraphText(nextParagraph)
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    nextParagraph.style?.numbering === undefined &&
+    nextParagraphText.length < 80
+  ) {
+    return 0;
+  }
+
+  return Math.max(
+    nextParagraph.style?.numbering ? 10 : 6,
+    Math.round(
+      estimateParagraphLineHeightPx(nextParagraph, docGridLinePitchPx) *
+        (nextParagraph.style?.numbering ? 1 : 0.5)
+    )
   );
 }
 
@@ -28181,6 +28346,8 @@ export function DocxEditorViewer({
     measuredPageContentIdentityKeysByIndex,
     setMeasuredPageContentIdentityKeysByIndex,
   ] = React.useState<string[]>([]);
+  const [hasMeasuredBodyFooterOverlap, setHasMeasuredBodyFooterOverlap] =
+    React.useState(false);
   const [, setRenderableImageSourceRevision] = React.useState(0);
   const [activeEditableParagraphSegment, setActiveEditableParagraphSegment] =
     React.useState<ParagraphSegmentIdentity | undefined>(undefined);
@@ -28258,6 +28425,7 @@ export function DocxEditorViewer({
     // otherwise leak into pagination and footer placement.
     setMeasuredPageContentHeightByIndex([]);
     setMeasuredPageContentIdentityKeysByIndex([]);
+    setHasMeasuredBodyFooterOverlap(false);
     setTableMeasuredRowHeights({});
     setTableRowHeights({});
     setTableColumnWidths({});
@@ -29140,6 +29308,7 @@ export function DocxEditorViewer({
         targetPageCount: resolvedTargetPageCount,
         hasLastRenderedPageBreakHints,
         renderedBreakHintPageCount,
+        hasMeasuredBodyFooterOverlap,
       }) &&
       (!measuredPageHeightOverridesReduceContent ||
         allowMeasuredReductionOverPaginationReconciliation);
@@ -29251,6 +29420,7 @@ export function DocxEditorViewer({
     floatingMovePreview,
     dropCapMovePreview,
     disableMeasuredImportPagination,
+    hasMeasuredBodyFooterOverlap,
     measuredPageContentHeightByIndex,
     tableMeasuredRowHeightsForPagination,
   ]);
@@ -30883,7 +31053,18 @@ export function DocxEditorViewer({
     const nextMeasuredHeights = nextMeasuredPageDiagnostics.map(
       (diagnostics) => diagnostics.heightPx
     );
+    const nextHasMeasuredBodyFooterOverlap =
+      shouldLatchMeasuredBodyFooterOverlap({
+        pageCount,
+        targetPageCount: editor.model.metadata.documentPageCount,
+        measuredBodyFooterOverlap: nextMeasuredPageDiagnostics.some(
+          (diagnostics) => diagnostics.bodyOverrunsFooter
+        ),
+      });
     const frameId = window.requestAnimationFrame(() => {
+      if (nextHasMeasuredBodyFooterOverlap) {
+        setHasMeasuredBodyFooterOverlap(true);
+      }
       setMeasuredPageContentHeightByIndex((current) => {
         const stabilizedHeights = stabilizeMeasuredPageContentHeights(
           current,
@@ -30949,6 +31130,7 @@ export function DocxEditorViewer({
     paginationMeasurementEnabled,
     paginationMeasurementEpoch,
     pageCount,
+    editor.model.metadata.documentPageCount,
     pageNodeSegmentsByPage,
     pageNodeSegmentIdentityKeysByPage,
     pageSectionInfoByIndex,

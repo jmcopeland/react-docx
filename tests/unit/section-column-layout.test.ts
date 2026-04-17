@@ -112,7 +112,7 @@ describe("section column layout xml", () => {
       ],
       {
         measuredTableRowHeightsByNodeIndex: {
-          0: [740],
+          0: [700],
         },
       }
     );

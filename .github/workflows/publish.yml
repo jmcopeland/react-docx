@@ -18,7 +18,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted publishing should be the default. Only expose an npm token when
+      # we explicitly opt into the legacy fallback path.
+      NPM_TOKEN: ${{ vars.NPM_PUBLISH_USE_TOKEN == 'true' && secrets.NPM_TOKEN || '' }}
+      NPM_TOKEN_FALLBACK_ENABLED: ${{ vars.NPM_PUBLISH_USE_TOKEN == 'true' && 'true' || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -106,7 +109,6 @@ jobs:
         id: npm_state
         env:
           PACKAGES_JSON: ${{ steps.meta.outputs.packages_json }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           node <<'NODE' >> "$GITHUB_OUTPUT"
           const { execFileSync } = require("node:child_process");
@@ -152,7 +154,7 @@ jobs:
         run: pnpm -r --filter './packages/*' run build
 
       - name: Publish with npm token bootstrap
-        if: steps.npm_state.outputs.all_published != 'true' && env.NPM_TOKEN != ''
+        if: steps.npm_state.outputs.all_published != 'true' && env.NPM_TOKEN_FALLBACK_ENABLED == 'true' && env.NPM_TOKEN != ''
         env:
           PACKAGES_JSON: ${{ steps.meta.outputs.packages_json }}
           UNPUBLISHED_JSON: ${{ steps.npm_state.outputs.unpublished_json }}

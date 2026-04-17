@@ -74,7 +74,7 @@ describe("page content height overrides", () => {
     ).toBe(false);
   });
 
-  it("treats Times Roman like a serif font for auto line spacing", () => {
+  it("uses serif spacing for Times Roman and only inflates checkbox choice rows", () => {
     const timesRomanHeightPx = estimateParagraphLineHeightPx({
       type: "paragraph",
       style: {
@@ -113,7 +113,49 @@ describe("page content height overrides", () => {
         },
       ],
     } as never);
+    const checkboxChoiceHeightPx = estimateParagraphLineHeightPx({
+      type: "paragraph",
+      style: {
+        spacing: {
+          lineTwips: 240,
+          lineRule: "auto",
+        },
+      },
+      children: [
+        {
+          type: "form-field",
+          fieldType: "checkbox",
+          checked: false,
+          checkedSymbol: "☒",
+          uncheckedSymbol: "☐",
+          style: {
+            fontSizePt: 12,
+            fontFamily: "MS Gothic",
+          },
+        },
+        {
+          type: "text",
+          text: "\tYes\tNo",
+          style: {
+            fontSizePt: 12,
+            fontFamily: "Arial",
+          },
+        },
+        {
+          type: "form-field",
+          fieldType: "checkbox",
+          checked: false,
+          checkedSymbol: "☒",
+          uncheckedSymbol: "☐",
+          style: {
+            fontSizePt: 12,
+            fontFamily: "MS Gothic",
+          },
+        },
+      ],
+    } as never);
 
     expect(timesRomanHeightPx).toBeGreaterThan(arialHeightPx);
+    expect(checkboxChoiceHeightPx).toBeGreaterThan(arialHeightPx);
   });
 });
