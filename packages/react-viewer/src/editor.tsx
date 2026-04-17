@@ -42373,12 +42373,31 @@ export function DocxEditorViewer({
     overflow: floatingMovePreview || dropCapMovePreview ? "visible" : "clip",
   };
 
+  interface TableCellParagraphSliceLayoutEntry {
+    paragraphForLayout: ParagraphNode;
+    paragraphHeightPx: number;
+    textTopOffsetPx: number;
+    lineHeightPx: number;
+    lineTopOffsetsPx: number[];
+    pretextSource?: ParagraphPretextLayoutSource;
+    pretextLayout?: PretextVariableWidthLayout;
+  }
+
   interface TableCellParagraphSlicePlan {
     paragraph: ParagraphNode;
     paragraphIndex: number;
     topPx: number;
+    layoutEntry: TableCellParagraphSliceLayoutEntry;
     paragraphLineRange?: ParagraphLineRange;
   }
+
+  const tableCellParagraphSliceLayoutCacheRef = React.useRef(
+    new Map<string, TableCellParagraphSliceLayoutEntry>()
+  );
+
+  React.useEffect(() => {
+    tableCellParagraphSliceLayoutCacheRef.current.clear();
+  }, [paragraphStructureEpoch]);
 
   const resolveTableCellParagraphSlicePlans = (params: {
     cell: TableNode["rows"][number]["cells"][number];
@@ -42445,72 +42464,92 @@ export function DocxEditorViewer({
 
       const disableDocGridSnap =
         paragraphDocGridSnapState(paragraph) === "disable";
-      const paragraphForLayout = wordLikeTableCellParagraph(
-        paragraph,
-        applyWordTableDefaults
-      );
-      const paragraphHeightPx = estimateParagraphHeightPx(
-        paragraphForLayout,
-        cellContentWidthPx,
-        numberingDefinitions,
-        docGridLinePitchPx,
-        disableDocGridSnap
-      );
+      const layoutCacheKey = `${cellContentWidthPx}:${applyWordTableDefaults ? 1 : 0}:${
+        docGridLinePitchPx ?? 0
+      }:${paragraphIndex}:${paragraph.sourceXml ?? paragraphText(paragraph)}`;
+      let layoutEntry =
+        tableCellParagraphSliceLayoutCacheRef.current.get(layoutCacheKey);
+      if (!layoutEntry) {
+        const paragraphForLayout = wordLikeTableCellParagraph(
+          paragraph,
+          applyWordTableDefaults
+        );
+        const paragraphHeightPx = estimateParagraphHeightPx(
+          paragraphForLayout,
+          cellContentWidthPx,
+          numberingDefinitions,
+          docGridLinePitchPx,
+          disableDocGridSnap
+        );
+        const suppressTopSpacing =
+          paragraphIndex === 0 &&
+          suppressFirstTableCellParagraphTopSpacing(paragraph);
+        const beforeSpacingPx = suppressTopSpacing
+          ? 0
+          : twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ?? 0;
+        const topBorderInsetPx = paragraphBorderInsetPx(
+          paragraphForLayout.style?.borders?.top
+        );
+        const lineHeightPx = estimateParagraphLineHeightPx(
+          paragraphForLayout,
+          docGridLinePitchPx,
+          disableDocGridSnap
+        );
+        const pretextSource = buildParagraphPretextLayoutSource(
+          paragraphForLayout,
+          {
+            allowExplicitLineBreakText: true,
+          }
+        );
+        const paragraphTextWidthPx = paragraphAvailableTextWidthPx(
+          paragraphForLayout,
+          cellContentWidthPx,
+          numberingDefinitions
+        );
+        const pretextLayout = pretextSource
+          ? layoutParagraphPretextSource(
+              paragraphForLayout,
+              pretextSource,
+              paragraphTextWidthPx,
+              lineHeightPx,
+              []
+            )
+          : undefined;
+        const totalLineCount = Math.max(
+          1,
+          pretextLayout?.lineCount ??
+            paragraphLineCountWithinWidth(
+              paragraphForLayout,
+              cellContentWidthPx,
+              numberingDefinitions
+            )
+        );
+        layoutEntry = {
+          paragraphForLayout,
+          paragraphHeightPx,
+          textTopOffsetPx: beforeSpacingPx + topBorderInsetPx,
+          lineHeightPx,
+          lineTopOffsetsPx: pretextLayout
+            ? pretextLayout.lines.map((line) => Math.max(0, Math.round(line.y)))
+            : Array.from({ length: totalLineCount }, (_, lineIndex) =>
+                lineIndex * lineHeightPx
+              ),
+          pretextSource: pretextSource ?? undefined,
+          pretextLayout: pretextLayout ?? undefined,
+        };
+        tableCellParagraphSliceLayoutCacheRef.current.set(
+          layoutCacheKey,
+          layoutEntry
+        );
+      }
+      const paragraphHeightPx = layoutEntry.paragraphHeightPx;
       const paragraphBottomPx = paragraphTopPx + paragraphHeightPx;
-      const suppressTopSpacing =
-        paragraphIndex === 0 &&
-        suppressFirstTableCellParagraphTopSpacing(paragraph);
-      const beforeSpacingPx = suppressTopSpacing
-        ? 0
-        : twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ?? 0;
-      const topBorderInsetPx = paragraphBorderInsetPx(
-        paragraphForLayout.style?.borders?.top
-      );
-      const lineHeightPx = estimateParagraphLineHeightPx(
-        paragraphForLayout,
-        docGridLinePitchPx,
-        disableDocGridSnap
-      );
-      const pretextSource = buildParagraphPretextLayoutSource(
-        paragraphForLayout,
-        {
-          allowExplicitLineBreakText: true,
-        }
-      );
-      const paragraphTextWidthPx = paragraphAvailableTextWidthPx(
-        paragraphForLayout,
-        cellContentWidthPx,
-        numberingDefinitions
-      );
-      const pretextLayout = pretextSource
-        ? layoutParagraphPretextSource(
-            paragraphForLayout,
-            pretextSource,
-            paragraphTextWidthPx,
-            lineHeightPx,
-            []
-          )
-        : undefined;
-      const totalLineCount = Math.max(
-        1,
-        pretextLayout?.lineCount ??
-          paragraphLineCountWithinWidth(
-            paragraphForLayout,
-            cellContentWidthPx,
-            numberingDefinitions
-          )
-      );
-      const lineTopOffsetsPx = pretextLayout
-        ? pretextLayout.lines.map((line) => Math.max(0, Math.round(line.y)))
-        : Array.from({ length: totalLineCount }, (_, lineIndex) =>
-            lineIndex * lineHeightPx
-          );
-      const textTopPx = paragraphTopPx + beforeSpacingPx + topBorderInsetPx;
+      const textTopPx = paragraphTopPx + layoutEntry.textTopOffsetPx;
       const textBottomPx =
         textTopPx +
-        (pretextLayout
-          ? wrappedPretextParagraphBlockHeightPx(pretextLayout)
-          : lineHeightPx * totalLineCount);
+        (layoutEntry.pretextLayout
+          ? wrappedPretextParagraphBlockHeightPx(layoutEntry.pretextLayout)
+          : layoutEntry.lineHeightPx * layoutEntry.lineTopOffsetsPx.length);
       const intersectsParagraph =
         sliceBottomPx > paragraphTopPx + PAGE_OVERFLOW_TOLERANCE_PX &&
         sliceStartPx < paragraphBottomPx - PAGE_OVERFLOW_TOLERANCE_PX;
@@ -42527,14 +42566,15 @@ export function DocxEditorViewer({
           paragraph,
           paragraphIndex,
           topPx: Math.max(0, Math.round(paragraphTopPx - sliceStartPx)),
+          layoutEntry,
         });
         paragraphTopPx = paragraphBottomPx;
         continue;
       }
 
       const paragraphLineRange = resolveLineRangeWithinVerticalSlice(
-        lineTopOffsetsPx,
-        lineHeightPx,
+        layoutEntry.lineTopOffsetsPx,
+        layoutEntry.lineHeightPx,
         sliceStartPx - textTopPx,
         sliceBottomPx - textTopPx
       );
@@ -42544,12 +42584,14 @@ export function DocxEditorViewer({
 
       const lineRangeTopPx =
         paragraphLineRange.startLineIndex > 0
-          ? textTopPx + lineTopOffsetsPx[paragraphLineRange.startLineIndex]
+          ? textTopPx +
+            layoutEntry.lineTopOffsetsPx[paragraphLineRange.startLineIndex]
           : paragraphTopPx;
       plans.push({
         paragraph,
         paragraphIndex,
         topPx: Math.max(0, Math.round(lineRangeTopPx - sliceStartPx)),
+        layoutEntry,
         paragraphLineRange,
       });
       paragraphTopPx = paragraphBottomPx;
@@ -42568,6 +42610,7 @@ export function DocxEditorViewer({
     cellContentWidthPx: number;
     applyWordTableDefaults: boolean;
     docGridLinePitchPx?: number;
+    layoutEntry: TableCellParagraphSliceLayoutEntry;
     paragraphLineRange?: ParagraphLineRange;
   }): React.ReactNode => {
     const {
@@ -42580,25 +42623,16 @@ export function DocxEditorViewer({
       cellContentWidthPx,
       applyWordTableDefaults,
       docGridLinePitchPx,
+      layoutEntry,
       paragraphLineRange,
     } = params;
     const numberingDefinitions = editor.model.metadata.numberingDefinitions;
-    const paragraphForLayout = wordLikeTableCellParagraph(
-      paragraph,
-      applyWordTableDefaults
-    );
-    const disableDocGridSnap =
-      paragraphDocGridSnapState(paragraph) === "disable";
+    const paragraphForLayout = layoutEntry.paragraphForLayout;
     const hasPartialLineRange =
       paragraphSegmentHasPartialLineRange(paragraphLineRange);
     const paragraphSegmentLineHeightPx = Math.max(
       1,
-      paragraphLineRange?.lineHeightPx ??
-        estimateParagraphLineHeightPx(
-          paragraphForLayout,
-          docGridLinePitchPx,
-          disableDocGridSnap
-        )
+      paragraphLineRange?.lineHeightPx ?? layoutEntry.lineHeightPx
     );
     const paragraphSegmentStartLine = paragraphLineRange?.startLineIndex ?? 0;
     const paragraphSegmentEndLine =
@@ -42626,25 +42660,23 @@ export function DocxEditorViewer({
     const numberingLabel = paragraphNumberingLabels.get(
       paragraphLocationKey(location)
     );
-    const pretextParagraphSource = hasPartialLineRange
-      ? buildParagraphPretextLayoutSource(paragraphForLayout, {
-          allowExplicitLineBreakText: true,
-        })
-      : undefined;
     const paragraphRenderTextWidthPx = paragraphAvailableTextWidthPx(
       paragraphForLayout,
       cellContentWidthPx,
       numberingDefinitions
     );
     const pretextParagraphLayout =
-      hasPartialLineRange && pretextParagraphSource
-        ? layoutParagraphPretextSource(
-            paragraphForLayout,
-            pretextParagraphSource,
-            paragraphRenderTextWidthPx,
-            paragraphSegmentLineHeightPx,
-            []
-          )
+      hasPartialLineRange && layoutEntry.pretextSource
+        ? layoutEntry.pretextLayout &&
+          Math.abs(paragraphSegmentLineHeightPx - layoutEntry.lineHeightPx) <= 1
+          ? layoutEntry.pretextLayout
+          : layoutParagraphPretextSource(
+              paragraphForLayout,
+              layoutEntry.pretextSource,
+              paragraphRenderTextWidthPx,
+              paragraphSegmentLineHeightPx,
+              []
+            )
         : undefined;
     const pretextParagraphTotalLines = Math.max(
       0,
@@ -42689,7 +42721,7 @@ export function DocxEditorViewer({
         : undefined;
     const shouldRenderParagraphSegmentWithPretext =
       hasPartialLineRange &&
-      Boolean(pretextParagraphSource) &&
+      Boolean(layoutEntry.pretextSource) &&
       Boolean(pretextParagraphLayout) &&
       pretextParagraphTotalLines > 0;
     const paragraphSegmentClipBleed = shouldRenderParagraphSegmentWithPretext
@@ -42819,13 +42851,13 @@ export function DocxEditorViewer({
             overflow: "visible",
           }}
         >
-          {pretextParagraphSource &&
+          {layoutEntry.pretextSource &&
           pretextParagraphSliceLayout &&
           pretextParagraphSliceLayout.lineCount > 0
             ? renderWrappedPretextParagraph({
                 location,
                 keyPrefix: `body-cell-${tableIndex}-${rowIndex}-${cellIndex}-${contentIndex}-lines-${paragraphSegmentStartLine}-${paragraphSegmentEndLine}`,
-                source: pretextParagraphSource,
+                source: layoutEntry.pretextSource,
                 layout: pretextParagraphSliceLayout,
                 lineHeightPx: paragraphSegmentLineHeightPx,
                 baseTextStyle: firstRunStyle(paragraph),
@@ -45994,6 +46026,7 @@ export function DocxEditorViewer({
                                             applyWordTableDefaults,
                                             docGridLinePitchPx:
                                               nodeDocGridLinePitchPx,
+                                            layoutEntry: plan.layoutEntry,
                                             paragraphLineRange:
                                               plan.paragraphLineRange,
                                           })}
