@@ -9831,18 +9831,18 @@ function estimateTableCellContentHeightPx(
   docGridLinePitchPx?: number
 ): number {
   let paragraphIndex = 0;
+  let expandedWithPretextLayout = false;
+  let totalHeightPx = 0;
 
-  return nodeContent.reduce((sum, contentNode) => {
+  for (const contentNode of nodeContent) {
     if (!isParagraphCellContentNode(contentNode)) {
-      return (
-        sum +
-        estimateTableHeightPx(
-          contentNode,
-          availableWidthPx,
-          numberingDefinitions,
-          docGridLinePitchPx
-        )
+      totalHeightPx += estimateTableHeightPx(
+        contentNode,
+        availableWidthPx,
+        numberingDefinitions,
+        docGridLinePitchPx
       );
+      continue;
     }
 
     const disableDocGridSnap =
@@ -9858,19 +9858,82 @@ function estimateTableCellContentHeightPx(
       docGridLinePitchPx,
       disableDocGridSnap
     );
+    const lineHeightPx = Math.max(
+      MIN_PARAGRAPH_LINE_HEIGHT_PX,
+      estimateParagraphLineHeightPx(
+        paragraphForLayout,
+        docGridLinePitchPx,
+        disableDocGridSnap
+      )
+    );
+    const pretextSource = buildParagraphPretextLayoutSource(
+      paragraphForLayout,
+      {
+        allowExplicitLineBreakText: true,
+        expandTabsForLayout: true,
+      }
+    );
+    const paragraphTextWidthPx =
+      typeof availableWidthPx === "number" && availableWidthPx > 0
+        ? paragraphAvailableTextWidthPx(
+            paragraphForLayout,
+            availableWidthPx,
+            numberingDefinitions
+          )
+        : undefined;
+    const pretextLayout =
+      pretextSource &&
+      typeof paragraphTextWidthPx === "number" &&
+      paragraphTextWidthPx > 0
+        ? layoutParagraphPretextSource(
+            paragraphForLayout,
+            pretextSource,
+            paragraphTextWidthPx,
+            lineHeightPx,
+            []
+        )
+        : undefined;
     const suppressTopSpacing =
       paragraphIndex === 0 &&
       suppressFirstTableCellParagraphTopSpacing(contentNode);
     paragraphIndex += 1;
-
-    if (!suppressTopSpacing) {
-      return sum + baseHeight;
+    const beforeSpacing =
+      suppressTopSpacing
+        ? 0
+        : twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ?? 0;
+    const afterSpacing =
+      twipsToPixels(paragraphForLayout.style?.spacing?.afterTwips) ?? 0;
+    const topBorderInsetPx = paragraphBorderInsetPx(
+      paragraphForLayout.style?.borders?.top
+    );
+    const bottomBorderInsetPx = paragraphBorderInsetPx(
+      paragraphForLayout.style?.borders?.bottom
+    );
+    const pretextHeightPx = pretextLayout
+      ? beforeSpacing +
+        afterSpacing +
+        topBorderInsetPx +
+        bottomBorderInsetPx +
+        wrappedPretextParagraphBlockHeightPx(pretextLayout)
+      : 0;
+    const resolvedBaseHeight =
+      pretextHeightPx > 0 ? Math.max(baseHeight, pretextHeightPx) : baseHeight;
+    if (pretextHeightPx > baseHeight) {
+      expandedWithPretextLayout = true;
     }
 
-    const beforeSpacing =
-      twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ?? 0;
-    return sum + Math.max(1, baseHeight - beforeSpacing);
-  }, 0);
+    if (!suppressTopSpacing) {
+      totalHeightPx += resolvedBaseHeight;
+      continue;
+    }
+
+    totalHeightPx += Math.max(1, resolvedBaseHeight - beforeSpacing);
+  }
+
+  return (
+    totalHeightPx +
+    (expandedWithPretextLayout ? Math.max(1, MIN_PARAGRAPH_LINE_HEIGHT_PX) : 0)
+  );
 }
 
 function rowAllowsPageSplit(row: TableNode["rows"][number]): boolean {
