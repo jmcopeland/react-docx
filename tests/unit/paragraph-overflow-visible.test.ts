@@ -43,6 +43,31 @@ const DOCUMENT_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:body>
 </w:document>`;
 
+const TALL_TABLE_PARAGRAPHS_XML = Array.from(
+  { length: 36 },
+  (_, index) => `
+          <w:p>
+            <w:r><w:t>Long sliced cell paragraph ${index + 1} with enough text to keep flowing across the page boundary.</w:t></w:r>
+          </w:p>`
+).join("");
+
+const TALL_TABLE_DOCUMENT_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc>
+          ${TALL_TABLE_PARAGRAPHS_XML}
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="2880"/>
+      <w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`;
+
 function ImportedViewer({
   model,
 }: {
@@ -75,6 +100,26 @@ describe("paragraph overflow visibility", () => {
     );
     expect(html).not.toMatch(
       /data-docx-paragraph-kind="(?:paragraph|table-cell)"[^>]*style="[^"]*overflow:auto[^"]*"/
+    );
+  });
+
+  it("does not clip sliced table-row wrappers", async () => {
+    const zip = createZip([
+      { name: "[Content_Types].xml", content: CONTENT_TYPES_XML, deflate: true },
+      { name: "_rels/.rels", content: ROOT_RELS_XML, deflate: true },
+      {
+        name: "word/document.xml",
+        content: TALL_TABLE_DOCUMENT_XML,
+        deflate: true,
+      },
+    ]);
+    const pkg = await parseDocx(zip);
+    const model = buildDocModel(pkg);
+    const html = renderToStaticMarkup(React.createElement(ImportedViewer, { model }));
+
+    expect(html).toContain('data-docx-row-sliced="true"');
+    expect(html).toMatch(
+      /style="[^"]*height:[^"]*padding-top:[^"]*padding-bottom:[^"]*box-sizing:border-box;overflow:visible[^"]*"><table/
     );
   });
 });

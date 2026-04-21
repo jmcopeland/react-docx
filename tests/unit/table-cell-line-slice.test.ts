@@ -7,20 +7,23 @@ import {
 } from "../../packages/react-viewer/src/editor";
 
 describe("table cell line slice", () => {
-  it("returns the fully visible lines inside a slice window", () => {
+  it("returns the lines whose bottoms fit inside a slice window", () => {
     expect(
       resolveLineRangeWithinVerticalSlice([0, 20, 40, 60], 20, 15, 65)
     ).toEqual({
-      startLineIndex: 1,
+      startLineIndex: 0,
       endLineIndex: 3,
       totalLineCount: 4,
       lineHeightPx: 20,
     });
   });
 
-  it("assigns boundary-crossing lines to a slice instead of dropping them", () => {
+  it("moves boundary-crossing lines to the following slice", () => {
     expect(
       resolveLineRangeWithinVerticalSlice([0, 20, 40], 20, 5, 15)
+    ).toBeUndefined();
+    expect(
+      resolveLineRangeWithinVerticalSlice([0, 20, 40], 20, 15, 35)
     ).toEqual({
       startLineIndex: 0,
       endLineIndex: 1,

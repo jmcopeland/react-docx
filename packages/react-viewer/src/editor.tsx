@@ -10740,11 +10740,10 @@ export function resolveLineRangeWithinVerticalSlice(
   for (let lineIndex = 0; lineIndex < lineTopOffsetsPx.length; lineIndex += 1) {
     const lineTopPx = lineTopOffsetsPx[lineIndex] ?? lineIndex * lineHeightPx;
     const lineBottomPx = lineTopPx + lineHeightPx;
-    const lineMidpointPx = lineTopPx + (lineBottomPx - lineTopPx) / 2;
     const lineBelongsToSlice =
       sliceHasHeight &&
-      lineMidpointPx >= safeSliceTopPx - PAGE_OVERFLOW_TOLERANCE_PX &&
-      lineMidpointPx < safeSliceBottomPx - PAGE_OVERFLOW_TOLERANCE_PX;
+      lineBottomPx > safeSliceTopPx + PAGE_OVERFLOW_TOLERANCE_PX &&
+      lineBottomPx <= safeSliceBottomPx + PAGE_OVERFLOW_TOLERANCE_PX;
     if (lineBelongsToSlice) {
       if (startLineIndex === undefined) {
         startLineIndex = lineIndex;
@@ -31102,7 +31101,7 @@ export function DocxEditorViewer({
         : DEFAULT_PAGE_VIRTUALIZATION_SETTLE_DELAY_MS
     )
   );
-  const pageVirtualizationOverscan = Math.max(
+  const rawPageVirtualizationOverscan = Math.max(
     0,
     Math.round(
       Number.isFinite(pageVirtualization?.overscan)
@@ -31110,6 +31109,10 @@ export function DocxEditorViewer({
         : DEFAULT_PAGE_VIRTUALIZATION_OVERSCAN
     )
   );
+  const pageVirtualizationOverscan =
+    hasLargeTableLayoutSurface && !Number.isFinite(pageVirtualization?.overscan)
+      ? 0
+      : rawPageVirtualizationOverscan;
   const webdriverActive =
     typeof navigator !== "undefined" && navigator.webdriver === true;
   const internalPageVirtualizationRequested =
@@ -31160,6 +31163,10 @@ export function DocxEditorViewer({
   const internalPageVirtualizationEnabled =
     internalPageVirtualizationRequested &&
     internalVirtualScrollElement !== null;
+  const internalPageVirtualizationPending =
+    typeof window !== "undefined" &&
+    internalPageVirtualizationRequested &&
+    internalVirtualScrollElement === null;
   const internalVirtualScrollUsesWindow =
     typeof document !== "undefined" &&
     internalVirtualScrollElement !== null &&
@@ -31387,7 +31394,18 @@ export function DocxEditorViewer({
     pageVirtualizationOverscan,
   ]);
   const effectiveVisiblePageRange =
-    visiblePageRange ?? observedVisiblePageRange ?? internalVisiblePageRange;
+    visiblePageRange ??
+    observedVisiblePageRange ??
+    internalVisiblePageRange ??
+    (internalPageVirtualizationPending
+      ? {
+          startPageIndex: 0,
+          endPageIndex: Math.min(
+            pageCount - 1,
+            Math.max(0, pageVirtualizationOverscan)
+          ),
+        }
+      : undefined);
   const normalizedVisiblePageRange = React.useMemo(() => {
     if (pageCount <= 0) {
       return {
@@ -31518,13 +31536,24 @@ export function DocxEditorViewer({
     }
 
     for (const pageIndex of visiblePageIndexes) {
-      if (!Number.isFinite(measuredPageContentHeightByIndex[pageIndex])) {
+      const pageSegments = pageNodeSegmentsByPage[pageIndex] ?? [];
+      const pageContainsTableRowSlice = pageSegments.some((segment) =>
+        Boolean(segment.tableRowSlice)
+      );
+      if (
+        !Number.isFinite(measuredPageContentHeightByIndex[pageIndex]) &&
+        !(hasLargeTableLayoutSurface && pageContainsTableRowSlice)
+      ) {
         return true;
       }
 
-      for (const segment of pageNodeSegmentsByPage[pageIndex] ?? []) {
+      for (const segment of pageSegments) {
         const tableNode = editor.model.nodes[segment.nodeIndex];
         if (!tableNode || tableNode.type !== "table") {
+          continue;
+        }
+
+        if (segment.tableRowSlice) {
           continue;
         }
 
@@ -31541,6 +31570,7 @@ export function DocxEditorViewer({
     return false;
   }, [
     editor.model.nodes,
+    hasLargeTableLayoutSurface,
     measuredPageContentHeightByIndex,
     pageCount,
     pageNodeSegmentsByPage,
@@ -43743,13 +43773,65 @@ export function DocxEditorViewer({
     paragraphLineRange?: ParagraphLineRange;
   }
 
+  interface TableCellParagraphFlowEntry {
+    paragraph: ParagraphNode;
+    paragraphIndex: number;
+    paragraphTopPx: number;
+    textTopPx: number;
+    paragraphBottomPx: number;
+    layoutEntry: TableCellParagraphSliceLayoutEntry;
+  }
+
+  interface TableCellParagraphFlowLayout {
+    contentHeightPx: number;
+    paddingPx: ReturnType<typeof resolveTableSpacingPaddingPx>;
+    entries: TableCellParagraphFlowEntry[];
+  }
+
   const tableCellParagraphSliceLayoutCacheRef = React.useRef(
     new Map<string, TableCellParagraphSliceLayoutEntry>()
+  );
+  const tableCellParagraphFlowLayoutCacheRef = React.useRef(
+    new Map<string, TableCellParagraphFlowLayout>()
+  );
+  const tableCellParagraphSlicePlanCacheRef = React.useRef(
+    new Map<string, TableCellParagraphSlicePlan[]>()
+  );
+  const tableCellParagraphSliceSignatureCacheRef = React.useRef(
+    new WeakMap<object, string>()
   );
 
   React.useEffect(() => {
     tableCellParagraphSliceLayoutCacheRef.current.clear();
+    tableCellParagraphFlowLayoutCacheRef.current.clear();
+    tableCellParagraphSlicePlanCacheRef.current.clear();
+    tableCellParagraphSliceSignatureCacheRef.current = new WeakMap<
+      object,
+      string
+    >();
   }, [paragraphStructureEpoch]);
+
+  const resolveTableCellParagraphSliceSignature = (
+    cell: TableNode["rows"][number]["cells"][number]
+  ): string => {
+    const cellKey = cell as object;
+    const cached =
+      tableCellParagraphSliceSignatureCacheRef.current.get(cellKey);
+    if (cached) {
+      return cached;
+    }
+
+    const signature = [
+      JSON.stringify(cell.style ?? null),
+      ...cell.nodes.map((paragraph, paragraphIndex) =>
+        isParagraphCellContentNode(paragraph)
+          ? `${paragraphIndex}:${paragraph.sourceXml ?? paragraphText(paragraph)}`
+          : `${paragraphIndex}:${paragraph.type}`
+      ),
+    ].join("\u001f");
+    tableCellParagraphSliceSignatureCacheRef.current.set(cellKey, signature);
+    return signature;
+  };
 
   const resolveTableCellParagraphSlicePlans = (params: {
     cell: TableNode["rows"][number]["cells"][number];
@@ -43776,23 +43858,171 @@ export function DocxEditorViewer({
     }
 
     const numberingDefinitions = editor.model.metadata.numberingDefinitions;
-    const contentHeightPx = estimateTableCellContentHeightPx(
-      cell.nodes,
+    const cellSignature = resolveTableCellParagraphSliceSignature(cell);
+    const flowLayoutCacheKey = [
       cellContentWidthPx,
-      numberingDefinitions,
-      applyWordTableDefaults,
-      docGridLinePitchPx
-    );
-    const paddingPx = resolveTableSpacingPaddingPx(
-      mergeTableSpacing(tableCellMarginTwips, cell.style?.marginTwips)
-    );
+      JSON.stringify(tableCellMarginTwips ?? null),
+      applyWordTableDefaults ? 1 : 0,
+      docGridLinePitchPx ?? 0,
+      cellSignature,
+    ].join(":");
+    let flowLayout =
+      tableCellParagraphFlowLayoutCacheRef.current.get(flowLayoutCacheKey);
+    if (!flowLayout) {
+      const contentHeightPx = estimateTableCellContentHeightPx(
+        cell.nodes,
+        cellContentWidthPx,
+        numberingDefinitions,
+        applyWordTableDefaults,
+        docGridLinePitchPx
+      );
+      const paddingPx = resolveTableSpacingPaddingPx(
+        mergeTableSpacing(tableCellMarginTwips, cell.style?.marginTwips)
+      );
+      let paragraphTopPx = paddingPx.top;
+      const entries: TableCellParagraphFlowEntry[] = [];
+
+      for (
+        let paragraphIndex = 0;
+        paragraphIndex < cell.nodes.length;
+        paragraphIndex += 1
+      ) {
+        const paragraph = cell.nodes[paragraphIndex];
+        if (!paragraph) {
+          continue;
+        }
+
+        const disableDocGridSnap =
+          paragraphDocGridSnapState(paragraph) === "disable";
+        const layoutCacheKey = `${cellContentWidthPx}:${
+          applyWordTableDefaults ? 1 : 0
+        }:${docGridLinePitchPx ?? 0}:${paragraphIndex}:${
+          paragraph.sourceXml ?? paragraphText(paragraph)
+        }`;
+        let layoutEntry =
+          tableCellParagraphSliceLayoutCacheRef.current.get(layoutCacheKey);
+        if (!layoutEntry) {
+          const paragraphForLayout = wordLikeTableCellParagraph(
+            paragraph,
+            applyWordTableDefaults
+          );
+          const paragraphHeightPx = estimateParagraphHeightPx(
+            paragraphForLayout,
+            cellContentWidthPx,
+            numberingDefinitions,
+            docGridLinePitchPx,
+            disableDocGridSnap
+          );
+          const suppressTopSpacing =
+            paragraphIndex === 0 &&
+            suppressFirstTableCellParagraphTopSpacing(paragraph);
+          const beforeSpacingPx = suppressTopSpacing
+            ? 0
+            : twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ??
+              0;
+          const topBorderInsetPx = paragraphBorderInsetPx(
+            paragraphForLayout.style?.borders?.top
+          );
+          const lineHeightPx = Math.max(
+            MIN_PARAGRAPH_LINE_HEIGHT_PX,
+            estimateParagraphLineHeightPx(
+              paragraphForLayout,
+              docGridLinePitchPx,
+              disableDocGridSnap
+            )
+          );
+          const pretextSource = buildParagraphPretextLayoutSource(
+            paragraphForLayout,
+            {
+              allowExplicitLineBreakText: true,
+              expandTabsForLayout: true,
+            }
+          );
+          const paragraphTextWidthPx = paragraphAvailableTextWidthPx(
+            paragraphForLayout,
+            cellContentWidthPx,
+            numberingDefinitions
+          );
+          const pretextLayout = pretextSource
+            ? layoutParagraphPretextSource(
+                paragraphForLayout,
+                pretextSource,
+                paragraphTextWidthPx,
+                lineHeightPx,
+                []
+              )
+            : undefined;
+          const totalLineCount = Math.max(
+            1,
+            pretextLayout?.lineCount ??
+              paragraphLineCountWithinWidth(
+                paragraphForLayout,
+                cellContentWidthPx,
+                numberingDefinitions
+              )
+          );
+          layoutEntry = {
+            paragraphForLayout,
+            paragraphHeightPx,
+            textTopOffsetPx: beforeSpacingPx + topBorderInsetPx,
+            lineHeightPx,
+            lineTopOffsetsPx: pretextLayout
+              ? pretextLayout.lines.map((line) =>
+                  Math.max(0, Math.round(line.y))
+                )
+              : Array.from({ length: totalLineCount }, (_, lineIndex) =>
+                  lineIndex * lineHeightPx
+                ),
+            pretextSource: pretextSource ?? undefined,
+            pretextLayout: pretextLayout ?? undefined,
+          };
+          tableCellParagraphSliceLayoutCacheRef.current.set(
+            layoutCacheKey,
+            layoutEntry
+          );
+        }
+
+        const paragraphHeightPx = layoutEntry.paragraphHeightPx;
+        const textTopPx = paragraphTopPx + layoutEntry.textTopOffsetPx;
+        const textBottomPx =
+          textTopPx +
+          (layoutEntry.pretextLayout
+            ? wrappedPretextParagraphBlockHeightPx(layoutEntry.pretextLayout)
+            : layoutEntry.lineHeightPx * layoutEntry.lineTopOffsetsPx.length);
+        const paragraphBottomPx = resolveTableCellParagraphVisualBottomPx({
+          paragraphTopPx,
+          paragraphHeightPx,
+          textBottomPx,
+        });
+        entries.push({
+          paragraph,
+          paragraphIndex,
+          paragraphTopPx,
+          textTopPx,
+          paragraphBottomPx,
+          layoutEntry,
+        });
+        paragraphTopPx = paragraphBottomPx;
+      }
+
+      flowLayout = {
+        contentHeightPx,
+        paddingPx,
+        entries,
+      };
+      tableCellParagraphFlowLayoutCacheRef.current.set(
+        flowLayoutCacheKey,
+        flowLayout
+      );
+    }
+
     const availableContentHeightPx = Math.max(
       0,
-      rowHeightPx - paddingPx.top - paddingPx.bottom
+      rowHeightPx - flowLayout.paddingPx.top - flowLayout.paddingPx.bottom
     );
     const extraVerticalSpacePx = Math.max(
       0,
-      availableContentHeightPx - contentHeightPx
+      availableContentHeightPx - flowLayout.contentHeightPx
     );
     const verticalOffsetPx =
       cell.style?.verticalAlign === "center"
@@ -43801,120 +44031,53 @@ export function DocxEditorViewer({
         ? extraVerticalSpacePx
         : 0;
     const sliceBottomPx = sliceStartPx + sliceHeightPx;
-    let paragraphTopPx = paddingPx.top + verticalOffsetPx;
+    const slicePlanCacheKey = [
+      flowLayoutCacheKey,
+      rowHeightPx,
+      sliceStartPx,
+      sliceHeightPx,
+    ].join(":");
+    const cachedPlans =
+      tableCellParagraphSlicePlanCacheRef.current.get(slicePlanCacheKey);
+    if (cachedPlans) {
+      return cachedPlans;
+    }
+
     const plans: TableCellParagraphSlicePlan[] = [];
+    let firstCandidateIndex = 0;
+    let low = 0;
+    let high = flowLayout.entries.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      const entryBottomPx =
+        (flowLayout.entries[mid]?.paragraphBottomPx ?? 0) + verticalOffsetPx;
+      if (entryBottomPx <= sliceStartPx + PAGE_OVERFLOW_TOLERANCE_PX) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    firstCandidateIndex = low;
 
     for (
-      let paragraphIndex = 0;
-      paragraphIndex < cell.nodes.length;
-      paragraphIndex += 1
+      let entryIndex = firstCandidateIndex;
+      entryIndex < flowLayout.entries.length;
+      entryIndex += 1
     ) {
-      const paragraph = cell.nodes[paragraphIndex];
-      if (!paragraph) {
+      const entry = flowLayout.entries[entryIndex];
+      if (!entry) {
         continue;
       }
-
-      const disableDocGridSnap =
-        paragraphDocGridSnapState(paragraph) === "disable";
-      const layoutCacheKey = `${cellContentWidthPx}:${applyWordTableDefaults ? 1 : 0}:${
-        docGridLinePitchPx ?? 0
-      }:${paragraphIndex}:${paragraph.sourceXml ?? paragraphText(paragraph)}`;
-      let layoutEntry =
-        tableCellParagraphSliceLayoutCacheRef.current.get(layoutCacheKey);
-      if (!layoutEntry) {
-        const paragraphForLayout = wordLikeTableCellParagraph(
-          paragraph,
-          applyWordTableDefaults
-        );
-        const paragraphHeightPx = estimateParagraphHeightPx(
-          paragraphForLayout,
-          cellContentWidthPx,
-          numberingDefinitions,
-          docGridLinePitchPx,
-          disableDocGridSnap
-        );
-        const suppressTopSpacing =
-          paragraphIndex === 0 &&
-          suppressFirstTableCellParagraphTopSpacing(paragraph);
-        const beforeSpacingPx = suppressTopSpacing
-          ? 0
-          : twipsToPixels(paragraphForLayout.style?.spacing?.beforeTwips) ?? 0;
-        const topBorderInsetPx = paragraphBorderInsetPx(
-          paragraphForLayout.style?.borders?.top
-        );
-        const lineHeightPx = Math.max(
-          MIN_PARAGRAPH_LINE_HEIGHT_PX,
-          estimateParagraphLineHeightPx(
-            paragraphForLayout,
-            docGridLinePitchPx,
-            disableDocGridSnap
-          )
-        );
-        const pretextSource = buildParagraphPretextLayoutSource(
-          paragraphForLayout,
-          {
-            allowExplicitLineBreakText: true,
-            expandTabsForLayout: true,
-          }
-        );
-        const paragraphTextWidthPx = paragraphAvailableTextWidthPx(
-          paragraphForLayout,
-          cellContentWidthPx,
-          numberingDefinitions
-        );
-        const pretextLayout = pretextSource
-          ? layoutParagraphPretextSource(
-              paragraphForLayout,
-              pretextSource,
-              paragraphTextWidthPx,
-              lineHeightPx,
-              []
-            )
-          : undefined;
-        const totalLineCount = Math.max(
-          1,
-          pretextLayout?.lineCount ??
-            paragraphLineCountWithinWidth(
-              paragraphForLayout,
-              cellContentWidthPx,
-              numberingDefinitions
-            )
-        );
-        layoutEntry = {
-          paragraphForLayout,
-          paragraphHeightPx,
-          textTopOffsetPx: beforeSpacingPx + topBorderInsetPx,
-          lineHeightPx,
-          lineTopOffsetsPx: pretextLayout
-            ? pretextLayout.lines.map((line) => Math.max(0, Math.round(line.y)))
-            : Array.from({ length: totalLineCount }, (_, lineIndex) =>
-                lineIndex * lineHeightPx
-              ),
-          pretextSource: pretextSource ?? undefined,
-          pretextLayout: pretextLayout ?? undefined,
-        };
-        tableCellParagraphSliceLayoutCacheRef.current.set(
-          layoutCacheKey,
-          layoutEntry
-        );
+      const paragraphTopPx = entry.paragraphTopPx + verticalOffsetPx;
+      const textTopPx = entry.textTopPx + verticalOffsetPx;
+      const paragraphBottomPx = entry.paragraphBottomPx + verticalOffsetPx;
+      if (paragraphTopPx >= sliceBottomPx - PAGE_OVERFLOW_TOLERANCE_PX) {
+        break;
       }
-      const paragraphHeightPx = layoutEntry.paragraphHeightPx;
-      const textTopPx = paragraphTopPx + layoutEntry.textTopOffsetPx;
-      const textBottomPx =
-        textTopPx +
-        (layoutEntry.pretextLayout
-          ? wrappedPretextParagraphBlockHeightPx(layoutEntry.pretextLayout)
-          : layoutEntry.lineHeightPx * layoutEntry.lineTopOffsetsPx.length);
-      const paragraphBottomPx = resolveTableCellParagraphVisualBottomPx({
-        paragraphTopPx,
-        paragraphHeightPx,
-        textBottomPx,
-      });
       const intersectsParagraph =
         sliceBottomPx > paragraphTopPx + PAGE_OVERFLOW_TOLERANCE_PX &&
         sliceStartPx < paragraphBottomPx - PAGE_OVERFLOW_TOLERANCE_PX;
       if (!intersectsParagraph) {
-        paragraphTopPx = paragraphBottomPx;
         continue;
       }
 
@@ -43926,41 +44089,41 @@ export function DocxEditorViewer({
       });
       if (fullyVisible) {
         plans.push({
-          paragraph,
-          paragraphIndex,
+          paragraph: entry.paragraph,
+          paragraphIndex: entry.paragraphIndex,
           topPx: Math.max(0, Math.round(paragraphTopPx - sliceStartPx)),
-          layoutEntry,
+          layoutEntry: entry.layoutEntry,
         });
-        paragraphTopPx = paragraphBottomPx;
         continue;
       }
 
       const paragraphLineRange = resolveLineRangeWithinVerticalSlice(
-        layoutEntry.lineTopOffsetsPx,
-        layoutEntry.lineHeightPx,
+        entry.layoutEntry.lineTopOffsetsPx,
+        entry.layoutEntry.lineHeightPx,
         sliceStartPx - textTopPx,
         sliceBottomPx - textTopPx
       );
       if (!paragraphLineRange) {
-        paragraphTopPx = paragraphBottomPx;
         continue;
       }
 
       const lineRangeTopPx =
         paragraphLineRange.startLineIndex > 0
           ? textTopPx +
-            layoutEntry.lineTopOffsetsPx[paragraphLineRange.startLineIndex]
+            entry.layoutEntry.lineTopOffsetsPx[
+              paragraphLineRange.startLineIndex
+            ]
           : paragraphTopPx;
       plans.push({
-        paragraph,
-        paragraphIndex,
+        paragraph: entry.paragraph,
+        paragraphIndex: entry.paragraphIndex,
         topPx: Math.max(0, Math.round(lineRangeTopPx - sliceStartPx)),
-        layoutEntry,
+        layoutEntry: entry.layoutEntry,
         paragraphLineRange,
       });
-      paragraphTopPx = paragraphBottomPx;
     }
 
+    tableCellParagraphSlicePlanCacheRef.current.set(slicePlanCacheKey, plans);
     return plans;
   };
 
@@ -45542,7 +45705,7 @@ export function DocxEditorViewer({
                 paddingTop: tableRowSliceTopBleedPxForWrapper,
                 paddingBottom: tableRowSliceBottomBleedPxForWrapper,
                 boxSizing: "border-box",
-                overflow: "clip",
+                overflow: "visible",
               }
             : undefined),
         }}
