@@ -146,6 +146,106 @@ function createExplicitTallSplitRowModel(): DocModel {
   };
 }
 
+function createNestedTableSplitRowModel(): DocModel {
+  return {
+    nodes: [
+      {
+        type: "table",
+        style: {
+          cellMarginTwips: {
+            topTwips: 0,
+            rightTwips: 0,
+            bottomTwips: 0,
+            leftTwips: 0
+          }
+        },
+        rows: [
+          {
+            type: "table-row",
+            style: {
+              heightTwips: 1050,
+              heightRule: "exact"
+            },
+            cells: [
+              {
+                type: "table-cell",
+                nodes: [
+                  {
+                    type: "paragraph",
+                    children: [{ type: "text", text: "Lead row" }]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            type: "table-row",
+            cells: [
+              {
+                type: "table-cell",
+                nodes: [
+                  {
+                    type: "table",
+                    rows: [
+                      {
+                        type: "table-row",
+                        style: {
+                          heightTwips: 600,
+                          heightRule: "exact"
+                        },
+                        cells: [
+                          {
+                            type: "table-cell",
+                            nodes: [
+                              {
+                                type: "paragraph",
+                                children: [
+                                  { type: "text", text: "Nested row 1" }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        type: "table-row",
+                        style: {
+                          heightTwips: 900,
+                          heightRule: "exact"
+                        },
+                        cells: [
+                          {
+                            type: "table-cell",
+                            nodes: [
+                              {
+                                type: "paragraph",
+                                children: [
+                                  { type: "text", text: "Nested row 2" }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    metadata: {
+      sourceParts: 1,
+      warnings: [],
+      headerSections: [],
+      footerSections: [],
+      paragraphStyles: []
+    }
+  };
+}
+
 describe("table row slice pagination", () => {
   it("slices oversize cantSplit rows instead of rendering one overflowing row", () => {
     const model = createModel();
@@ -298,6 +398,148 @@ describe("table row slice pagination", () => {
           tableRowRange: {
             startRowIndex: 1,
             endRowIndex: 2
+          }
+        }
+      ]
+    ]);
+  });
+
+  it("slices split-capable rows into usable remaining page space", () => {
+    const model = createTwoRowModel();
+    const table = model.nodes[0];
+    if (table?.type === "table") {
+      table.rows[0]!.style = {
+        ...(table.rows[0]!.style ?? {}),
+        heightTwips: 1050,
+        heightRule: "exact"
+      };
+    }
+    const measuredTableRowHeightsByNodeIndex =
+      resolveTableMeasuredRowHeightsForPagination(
+        model.nodes,
+        {
+          0: [70, 100]
+        },
+        {
+          allowMeasuredImportPagination: true,
+          pageContentWidthPxByNodeIndex: new Map([[0, 400]]),
+          pageContentHeightPxByNodeIndex: new Map([[0, 120]])
+        }
+      );
+
+    const pages = buildDocumentPageNodeSegments(
+      model,
+      120,
+      400,
+      undefined,
+      undefined,
+      {
+        measuredTableRowHeightsByNodeIndex
+      }
+    );
+
+    expect(pages).toEqual([
+      [
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 0,
+            endRowIndex: 1
+          }
+        },
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 1,
+            endRowIndex: 2
+          },
+          tableRowSlice: {
+            rowIndex: 1,
+            startOffsetPx: 0,
+            sliceHeightPx: 50,
+            totalRowHeightPx: 100
+          }
+        }
+      ],
+      [
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 1,
+            endRowIndex: 2
+          },
+          tableRowSlice: {
+            rowIndex: 1,
+            startOffsetPx: 50,
+            sliceHeightPx: 50,
+            totalRowHeightPx: 100
+          }
+        }
+      ]
+    ]);
+  });
+
+  it("snaps nested-table row slices to nested row boundaries", () => {
+    const model = createNestedTableSplitRowModel();
+    const measuredTableRowHeightsByNodeIndex =
+      resolveTableMeasuredRowHeightsForPagination(
+        model.nodes,
+        {
+          0: [70, 100]
+        },
+        {
+          allowMeasuredImportPagination: true,
+          pageContentWidthPxByNodeIndex: new Map([[0, 400]]),
+          pageContentHeightPxByNodeIndex: new Map([[0, 120]])
+        }
+      );
+
+    const pages = buildDocumentPageNodeSegments(
+      model,
+      120,
+      400,
+      undefined,
+      undefined,
+      {
+        measuredTableRowHeightsByNodeIndex
+      }
+    );
+
+    expect(pages).toEqual([
+      [
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 0,
+            endRowIndex: 1
+          }
+        },
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 1,
+            endRowIndex: 2
+          },
+          tableRowSlice: {
+            rowIndex: 1,
+            startOffsetPx: 0,
+            sliceHeightPx: 40,
+            totalRowHeightPx: 100
+          }
+        }
+      ],
+      [
+        {
+          nodeIndex: 0,
+          tableRowRange: {
+            startRowIndex: 1,
+            endRowIndex: 2
+          },
+          tableRowSlice: {
+            rowIndex: 1,
+            startOffsetPx: 40,
+            sliceHeightPx: 60,
+            totalRowHeightPx: 100
           }
         }
       ]

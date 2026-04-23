@@ -1036,6 +1036,7 @@ export function buildDocumentPageNodeSegments(
     }
 
     let rowStartIndex = 0;
+    let tableBreakStartRowCursor = 0;
     while (rowStartIndex < estimatedRowHeightsPx.length) {
       const remainingHeightPx = Math.max(0, currentPageContentHeightPx - pageConsumedHeightPx);
       const fittedRowEndIndex = fitTableRowsWithinHeightPx(
@@ -1047,9 +1048,13 @@ export function buildDocumentPageNodeSegments(
         pageOverflowTolerancePx
       );
       let rowEndIndex = fittedRowEndIndex;
-      const forcedBreakRowIndex = tableBreakStartRows.find(
-        (breakRowIndex) => breakRowIndex > rowStartIndex
-      );
+      while (
+        tableBreakStartRowCursor < tableBreakStartRows.length &&
+        tableBreakStartRows[tableBreakStartRowCursor] <= rowStartIndex
+      ) {
+        tableBreakStartRowCursor += 1;
+      }
+      const forcedBreakRowIndex = tableBreakStartRows[tableBreakStartRowCursor];
       if (forcedBreakRowIndex !== undefined) {
         rowEndIndex = Math.min(rowEndIndex, forcedBreakRowIndex);
       }

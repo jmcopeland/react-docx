@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { DocModel } from "../../packages/doc-model/src";
 
 import {
+  buildRenderColumnSegmentsForPageSection,
   buildDocumentPageNodeSegments,
+  resolveRenderPageContentHeightPxForPageSegments,
   resolveSectionPaginationContentWidthPx,
 } from "../../packages/react-viewer/src/editor";
 
@@ -197,5 +199,83 @@ describe("section column layout xml", () => {
     );
 
     expect(pages).toEqual([[{ nodeIndex: 0 }], [{ nodeIndex: 1 }]]);
+  });
+
+  it("uses visual page height, not multiplied flow height, while rendering multi-column sections", () => {
+    expect(
+      resolveRenderPageContentHeightPxForPageSegments({
+        pageSegments: [{ nodeIndex: 1 }],
+        pageIndex: 0,
+        defaultPageContentHeightPx: 864,
+        metricsBySection: [
+          {
+            startNodeIndex: 0,
+            pageContentWidthPx: 624,
+            pageContentHeightPx: 864,
+            pageContentHeightMultiplier: 1,
+          },
+          {
+            startNodeIndex: 1,
+            pageContentWidthPx: 288,
+            pageContentHeightPx: 1728,
+            pageContentHeightMultiplier: 2,
+          },
+        ],
+      })
+    ).toBe(864);
+
+    expect(
+      resolveRenderPageContentHeightPxForPageSegments({
+        pageSegments: [{ nodeIndex: 1 }],
+        pageIndex: 0,
+        defaultPageContentHeightPx: 864,
+        metricsBySection: [
+          {
+            startNodeIndex: 1,
+            pageContentWidthPx: 288,
+            pageContentHeightPx: 1728,
+            pageContentHeightMultiplier: 2,
+          },
+        ],
+        measuredPageContentHeightsPxByPageIndex: [820],
+      })
+    ).toBe(820);
+  });
+
+  it("splits long paragraphs across rendered section columns by line range", () => {
+    const model: DocModel = {
+      nodes: [
+        {
+          type: "paragraph",
+          children: [
+            {
+              type: "text",
+              text: Array.from({ length: 80 }, () => "word").join(" "),
+            },
+          ],
+        },
+      ],
+      metadata: {
+        sourceParts: 1,
+        warnings: [],
+        headerSections: [],
+        footerSections: [],
+        paragraphStyles: [],
+      },
+    };
+
+    const columns = buildRenderColumnSegmentsForPageSection(
+      model,
+      [{ nodeIndex: 0 }],
+      [120, 120],
+      64
+    );
+
+    expect(columns).toHaveLength(2);
+    expect(columns[0][0]?.paragraphLineRange?.startLineIndex).toBe(0);
+    expect(columns[0][0]?.paragraphLineRange?.endLineIndex).toBeGreaterThan(0);
+    expect(columns[1][0]?.paragraphLineRange?.startLineIndex).toBe(
+      columns[0][0]?.paragraphLineRange?.endLineIndex
+    );
   });
 });

@@ -5872,14 +5872,23 @@ function parseParagraphRuns(
     }
   });
 
+  let hyperlinkRangeCursor = 0;
   return runRanges.map((range, runIndex) => {
-    const link =
-      hyperlinkRanges.find(
-        (hyperlinkRange) =>
-          range.start >= hyperlinkRange.start &&
-          range.end <= hyperlinkRange.end &&
-          hyperlinkRange.href
-      )?.href ?? fieldLinksByRun.get(runIndex);
+    while (
+      hyperlinkRangeCursor < hyperlinkRanges.length &&
+      hyperlinkRanges[hyperlinkRangeCursor].end <= range.start
+    ) {
+      hyperlinkRangeCursor += 1;
+    }
+
+    const currentHyperlinkRange = hyperlinkRanges[hyperlinkRangeCursor];
+    const hyperlinkHref =
+      currentHyperlinkRange &&
+      range.start >= currentHyperlinkRange.start &&
+      range.end <= currentHyperlinkRange.end
+        ? currentHyperlinkRange.href
+        : undefined;
+    const link = hyperlinkHref ?? fieldLinksByRun.get(runIndex);
 
     return {
       xml: paragraphXml.slice(range.start, range.end),
@@ -6715,10 +6724,20 @@ function parseParagraph(
       }
   > = [];
 
+  let formFieldTokenCursor = 0;
   for (const run of runs) {
-    const insideFormField = formFieldTokens.some(
-      (formFieldToken) =>
-        run.start >= formFieldToken.start && run.end <= formFieldToken.end
+    while (
+      formFieldTokenCursor < formFieldTokens.length &&
+      formFieldTokens[formFieldTokenCursor].end <= run.start
+    ) {
+      formFieldTokenCursor += 1;
+    }
+
+    const currentFormFieldToken = formFieldTokens[formFieldTokenCursor];
+    const insideFormField = Boolean(
+      currentFormFieldToken &&
+        run.start >= currentFormFieldToken.start &&
+        run.end <= currentFormFieldToken.end
     );
     if (insideFormField) {
       continue;

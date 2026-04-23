@@ -3,6 +3,51 @@ import type { DocModel } from "@extend-ai/react-docx-doc-model";
 import { buildDocumentPageNodeSegments } from "../../packages/react-viewer/src/editor";
 
 describe("rendered page break pagination", () => {
+  it("honors paragraph-start rendered page breaks when the previous page is nearly full", () => {
+    const model: DocModel = {
+      nodes: [
+        {
+          type: "paragraph",
+          children: [
+            {
+              type: "image",
+              src: "data:image/png;base64,",
+              widthPx: 12,
+              heightPx: 90
+            }
+          ]
+        },
+        {
+          type: "paragraph",
+          sourceXml:
+            `<w:p><w:r><w:lastRenderedPageBreak/></w:r>` +
+            `<w:r><w:t>Second page</w:t></w:r></w:p>`,
+          children: [{ type: "text", text: "Second page" }]
+        }
+      ],
+      metadata: {
+        sourceParts: 1,
+        warnings: [],
+        headerSections: [],
+        footerSections: [],
+        paragraphStyles: []
+      }
+    };
+
+    const pages = buildDocumentPageNodeSegments(
+      model,
+      50,
+      400,
+      undefined,
+      undefined,
+      {
+        preferLastRenderedParagraphStartBreaks: true
+      }
+    );
+
+    expect(pages).toEqual([[{ nodeIndex: 0 }], [{ nodeIndex: 1 }]]);
+  });
+
   it("ignores paragraph-start rendered page breaks when they would leave a large gap", () => {
     const model: DocModel = {
       nodes: [

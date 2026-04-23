@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { DocModel } from "@extend-ai/react-docx-doc-model";
 import { buildDocModel } from "@extend-ai/react-docx-doc-model";
 import { parseDocx } from "@extend-ai/react-docx-ooxml-core";
 import {
@@ -31,6 +32,22 @@ async function buildModelFromDocumentXml(documentXml: string) {
 }
 
 describe("pagination-breaks", () => {
+  it("honors imported style-based pageBreakBefore as a hard break", () => {
+    const nodes: DocModel["nodes"] = [
+      {
+        type: "paragraph",
+        children: [{ type: "text", text: "Intro" }]
+      },
+      {
+        type: "paragraph",
+        style: { pageBreakBefore: true },
+        children: [{ type: "text", text: "Starts next page" }]
+      }
+    ];
+
+    expect([...collectTopLevelExplicitPageBreakStartNodeIndexes(nodes)]).toEqual([1]);
+  });
+
   it("keeps page breaks inside table rows as row boundaries instead of breaks after the table", async () => {
     const model = await buildModelFromDocumentXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">

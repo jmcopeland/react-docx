@@ -28,7 +28,13 @@ function paragraphHasExplicitPageBreak(paragraph: Pick<ParagraphNode, "sourceXml
   return sourceXml.length > 0 && PAGE_BREAK_XML_PATTERN.test(sourceXml);
 }
 
-function paragraphHasPageBreakBefore(paragraph: Pick<ParagraphNode, "sourceXml">): boolean {
+function paragraphHasPageBreakBefore(
+  paragraph: Pick<ParagraphNode, "sourceXml" | "style">
+): boolean {
+  if (paragraph.style?.pageBreakBefore === true) {
+    return true;
+  }
+
   const sourceXml = paragraph.sourceXml ?? "";
   if (!sourceXml) {
     return false;
