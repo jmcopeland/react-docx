@@ -3484,6 +3484,7 @@ export interface DocxEditorController {
   documentLoadNonce: number;
   fileName: string;
   status: string;
+  importError?: Error;
   isImporting: boolean;
   documentTheme: DocxDocumentTheme;
   selection: DocxEditorSelection;
@@ -4256,76 +4257,7 @@ export const defaultStarterModel: DocModel = {
   nodes: [
     {
       type: "paragraph",
-      style: { headingLevel: 1, styleId: "Heading1", styleName: "Heading 1" },
-      children: [
-        { type: "text", text: "React DOCX WYSIWYG", style: { bold: true } },
-      ],
-    },
-    {
-      type: "paragraph",
-      children: [
-        {
-          type: "text",
-          text: "Import a .docx, edit styles from the toolbar, and export.",
-          style: { highlight: "yellow" },
-        },
-      ],
-    },
-    {
-      type: "table",
-      style: {
-        borders: createDefaultEditorTableBorders(),
-      },
-      rows: [
-        {
-          type: "table-row",
-          cells: [
-            {
-              type: "table-cell",
-              style: { backgroundColor: "#eef2ff" },
-              nodes: [
-                {
-                  type: "paragraph",
-                  children: [{ type: "text", text: "Header A" }],
-                },
-              ],
-            },
-            {
-              type: "table-cell",
-              style: { backgroundColor: "#eef2ff" },
-              nodes: [
-                {
-                  type: "paragraph",
-                  children: [{ type: "text", text: "Header B" }],
-                },
-              ],
-            },
-          ],
-        },
-        {
-          type: "table-row",
-          cells: [
-            {
-              type: "table-cell",
-              nodes: [
-                {
-                  type: "paragraph",
-                  children: [{ type: "text", text: "Row 1" }],
-                },
-              ],
-            },
-            {
-              type: "table-cell",
-              nodes: [
-                {
-                  type: "paragraph",
-                  children: [{ type: "text", text: "Value" }],
-                },
-              ],
-            },
-          ],
-        },
-      ],
+      children: [{ type: "text", text: "" }],
     },
   ],
   metadata: {
@@ -4408,6 +4340,10 @@ export const defaultStarterModel: DocModel = {
     defaultParagraphStyleId: "Normal",
   },
 };
+
+function createBlankDocumentModel(): DocModel {
+  return cloneDocModel(defaultStarterModel);
+}
 
 function textRuns(paragraph: ParagraphNode): TextRunNode[] {
   return paragraph.children.filter(
@@ -23624,6 +23560,7 @@ export function useDocxEditor(
   const [status, setStatus] = React.useState<string>(
     options.initialStatus ?? "Ready"
   );
+  const [importError, setImportError] = React.useState<Error | undefined>();
   const [isImporting, setIsImporting] = React.useState(false);
   const [documentTheme, setDocumentThemeState] =
     React.useState<DocxDocumentTheme>(options.initialDocumentTheme ?? "light");
@@ -24328,11 +24265,25 @@ export function useDocxEditor(
   const importDocxFile = React.useCallback(
     async (file: File): Promise<void> => {
       if (!/\.docx$/i.test(file.name)) {
-        setStatus("Only .docx files are supported");
+        const nextError = new Error("Only .docx files are supported");
+        unloadEmbeddedFonts();
+        setModel(createBlankDocumentModel());
+        setDocumentLoadNonce((current) => current + 1);
+        setHistory({ past: [], future: [] });
+        setHistoryRestoreRequest(undefined);
+        setBasePackage(undefined);
+        setFileName(file.name);
+        setSelection({ kind: "paragraph", nodeIndex: 0 });
+        setActiveTextRangeState(undefined);
+        setPendingRunStyle(undefined);
+        setSelectedFormFieldLocation(undefined);
+        setImportError(nextError);
+        setStatus(`Failed to load file: ${nextError.message}`);
         return;
       }
 
       setIsImporting(true);
+      setImportError(undefined);
       setStatus(`Loading ${file.name}...`);
       try {
         const buffer = await file.arrayBuffer();
@@ -24350,18 +24301,31 @@ export function useDocxEditor(
         setActiveTextRangeState(undefined);
         setPendingRunStyle(undefined);
         setSelectedFormFieldLocation(undefined);
+        setImportError(undefined);
         setStatus(`Loaded ${file.name}`);
       } catch (error) {
+        const nextError =
+          error instanceof Error ? error : new Error("Unknown error");
+        unloadEmbeddedFonts();
+        setModel(createBlankDocumentModel());
+        setDocumentLoadNonce((current) => current + 1);
+        setHistory({ past: [], future: [] });
+        setHistoryRestoreRequest(undefined);
+        setBasePackage(undefined);
+        setFileName(file.name);
+        setSelection({ kind: "paragraph", nodeIndex: 0 });
+        setActiveTextRangeState(undefined);
+        setPendingRunStyle(undefined);
+        setSelectedFormFieldLocation(undefined);
+        setImportError(nextError);
         setStatus(
-          `Failed to load file: ${
-            error instanceof Error ? error.message : "Unknown error"
-          }`
+          `Failed to load file: ${nextError.message}`
         );
       } finally {
         setIsImporting(false);
       }
     },
-    [loadEmbeddedFontsFromPackage]
+    [loadEmbeddedFontsFromPackage, unloadEmbeddedFonts]
   );
 
   const newDocument = React.useCallback((): void => {
@@ -24376,6 +24340,7 @@ export function useDocxEditor(
     setSelectedFormFieldLocation(undefined);
     setHistory({ past: [], future: [] });
     setHistoryRestoreRequest(undefined);
+    setImportError(undefined);
     setStatus("Created new document");
   }, [unloadEmbeddedFonts]);
 
@@ -28022,6 +27987,7 @@ export function useDocxEditor(
     documentLoadNonce,
     fileName,
     status,
+    importError,
     isImporting,
     documentTheme,
     trackedChanges,
@@ -50348,6 +50314,45 @@ export function DocxEditorViewer({
           }}
         >
           Drop .docx anywhere to replace current document
+        </div>
+      ) : null}
+      {editor.importError ? (
+        <div
+          role="alert"
+          data-docx-import-error="true"
+          style={{
+            position: "absolute",
+            top: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 80,
+            width: "min(520px, calc(100% - 32px))",
+            display: "grid",
+            gap: 6,
+            padding: "12px 14px",
+            borderRadius: 8,
+            border: `1px solid ${
+              editor.documentTheme === "dark"
+                ? "rgba(248, 113, 113, 0.42)"
+                : "rgba(185, 28, 28, 0.26)"
+            }`,
+            backgroundColor:
+              editor.documentTheme === "dark"
+                ? "rgba(69, 10, 10, 0.96)"
+                : "rgba(254, 242, 242, 0.98)",
+            color: editor.documentTheme === "dark" ? "#fee2e2" : "#7f1d1d",
+            boxShadow:
+              editor.documentTheme === "dark"
+                ? "0 12px 28px rgba(2, 6, 23, 0.44)"
+                : "0 12px 28px rgba(127, 29, 29, 0.12)",
+            fontSize: 13,
+            lineHeight: 1.35,
+          }}
+        >
+          <strong style={{ fontWeight: 600 }}>Failed to load DOCX</strong>
+          <span style={{ overflowWrap: "anywhere" }}>
+            {editor.importError.message}
+          </span>
         </div>
       ) : null}
       {tableMoveDropPreview && !isReadOnly ? (

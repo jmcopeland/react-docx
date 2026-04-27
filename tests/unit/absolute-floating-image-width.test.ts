@@ -28,7 +28,7 @@ describe("absolute floating image width", () => {
             src: "data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22763%22%20height%3D%22996%22%3E%3Crect%20width%3D%22763%22%20height%3D%22996%22%20fill%3D%22%2351872f%22%2F%3E%3C%2Fsvg%3E",
             alt: "Centered background",
             widthPx: 763,
-            heightPx: 996,
+            heightPx: 600,
             floating: {
               horizontalAlign: "center",
               horizontalRelativeTo: "page",
@@ -46,7 +46,7 @@ describe("absolute floating image width", () => {
 
     expect(html).toContain('data-docx-image-location="p:0:0"');
     expect(html).toContain("width:900px");
-    expect(html).toContain("height:1175px");
+    expect(html).toContain("height:708px");
     expect(html).toContain("left:50%");
     expect(html).toContain("transform:translateX(-50%)");
   });
