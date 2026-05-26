@@ -213,7 +213,7 @@ jobs:
             console.log(`Publishing ${pkg.name}@${pkg.version}`);
             execFileSync(
               "pnpm",
-              ["publish", "--access", "restricted", "--no-git-checks"],
+              ["publish", "--access", "public", "--no-git-checks"],
               {
                 cwd: pkg.dir,
                 stdio: "inherit",
@@ -281,7 +281,7 @@ jobs:
             console.log(`Publishing ${pkg.name}@${pkg.version}`);
             execFileSync(
               "pnpm",
-              ["publish", "--access", "restricted", "--no-git-checks"],
+              ["publish", "--access", "public", "--no-git-checks"],
               {
                 cwd: pkg.dir,
                 stdio: "inherit",

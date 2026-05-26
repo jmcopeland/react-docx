@@ -21,7 +21,7 @@ import {
   useDocxPageLayout,
   useDocxPageThumbnails,
   useDocxParagraphStyles,
-  useDocxTrackChanges
+  useDocxTrackChanges,
 } from "@extend-ai/react-docx";
 import {
   ArrowDown,
@@ -1499,9 +1499,12 @@ export function App(): React.JSX.Element {
     setThemeReady(true);
   }, []);
 
-  const hasFilePayload = React.useCallback((dataTransfer: DataTransfer | null) => {
-    return Array.from(dataTransfer?.types ?? []).includes("Files");
-  }, []);
+  const hasFilePayload = React.useCallback(
+    (dataTransfer: DataTransfer | null) => {
+      return Array.from(dataTransfer?.types ?? []).includes("Files");
+    },
+    []
+  );
 
   const extractDroppedDocxFile = React.useCallback(
     (dataTransfer: DataTransfer | null): File | undefined => {
@@ -2935,10 +2938,7 @@ export function App(): React.JSX.Element {
           </div>
         </div>
 
-        <Sheet
-          open={thumbnailsSheetOpen}
-          onOpenChange={setThumbnailsSheetOpen}
-        >
+        <Sheet open={thumbnailsSheetOpen} onOpenChange={setThumbnailsSheetOpen}>
           <SheetContent side="right" className="w-[24rem] sm:max-w-[24rem]">
             <SheetHeader className="pb-3">
               <SheetTitle>Page Thumbnails</SheetTitle>
@@ -2950,8 +2950,7 @@ export function App(): React.JSX.Element {
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
               <div className="grid gap-3">
                 {thumbnails.map((thumbnail) => {
-                  const rotatePreview =
-                    thumbnail.widthPx > thumbnail.heightPx;
+                  const rotatePreview = thumbnail.widthPx > thumbnail.heightPx;
                   const previewWidthPx = rotatePreview
                     ? thumbnail.heightPx
                     : thumbnail.widthPx;
