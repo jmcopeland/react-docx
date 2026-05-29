@@ -4266,7 +4266,15 @@ export const defaultStarterModel: DocModel = {
     headerSections: [],
     footerSections: [],
     paragraphStyles: [
-      { id: "Normal", name: "Body", isDefault: true },
+      {
+        id: "Normal",
+        name: "Body",
+        isDefault: true,
+        // Word's blank-document default body typeface. Without this the body
+        // default fell through to a heading font / Times New Roman and did not
+        // match the "Calibri" shown in the toolbar.
+        runStyle: { fontFamily: "Calibri", fontSizePt: 11 },
+      },
       {
         id: "Heading1",
         name: "Heading 1",
@@ -4433,8 +4441,13 @@ function resolveDocumentInheritedFontFamily(
     return cssFontFamily(defaultStyleFontFamily);
   }
 
-  const paragraphStyleFontFamily = paragraphStyles.find((style) =>
-    Boolean(style.runStyle?.fontFamily?.trim())
+  // Never adopt a heading style's font as the document body default. Heading
+  // styles (e.g. "Calibri Light") are not the body typeface, and using one here
+  // made freshly typed body text render in the wrong font until it committed.
+  const paragraphStyleFontFamily = paragraphStyles.find(
+    (style) =>
+      style.headingLevel === undefined &&
+      Boolean(style.runStyle?.fontFamily?.trim())
   )?.runStyle?.fontFamily;
   if (paragraphStyleFontFamily) {
     return cssFontFamily(paragraphStyleFontFamily);
@@ -8031,7 +8044,24 @@ function nodeAlreadyEndsAtExplicitPageBoundary(
   );
 }
 
+const docxHardPageBreakStartNodeIndexesByModel = new WeakMap<
+  DocModel,
+  Set<number>
+>();
+
 function collectDocxHardPageBreakStartNodeIndexes(
+  model: DocModel
+): Set<number> {
+  const cached = docxHardPageBreakStartNodeIndexesByModel.get(model);
+  if (cached) {
+    return cached;
+  }
+  const result = computeDocxHardPageBreakStartNodeIndexes(model);
+  docxHardPageBreakStartNodeIndexesByModel.set(model, result);
+  return result;
+}
+
+function computeDocxHardPageBreakStartNodeIndexes(
   model: DocModel
 ): Set<number> {
   const breaks = collectTopLevelExplicitPageBreakStartNodeIndexes(model.nodes);
@@ -8069,7 +8099,24 @@ function collectDocxHardPageBreakStartNodeIndexes(
   return breaks;
 }
 
+const docxSectionStartPageBreakNodeIndexesByModel = new WeakMap<
+  DocModel,
+  Set<number>
+>();
+
 function collectDocxSectionStartPageBreakNodeIndexes(
+  model: DocModel
+): Set<number> {
+  const cached = docxSectionStartPageBreakNodeIndexesByModel.get(model);
+  if (cached) {
+    return cached;
+  }
+  const result = computeDocxSectionStartPageBreakNodeIndexes(model);
+  docxSectionStartPageBreakNodeIndexesByModel.set(model, result);
+  return result;
+}
+
+function computeDocxSectionStartPageBreakNodeIndexes(
   model: DocModel
 ): Set<number> {
   const breaks = new Set<number>();
@@ -30273,6 +30320,24 @@ export function DocxEditorViewer({
   const fileDragDepthRef = React.useRef(0);
   const tableDraftLayoutRefreshRafRef = React.useRef<number | null>(null);
   const activeRangeFlushFrameRef = React.useRef<number | null>(null);
+  // The last known-good DOM selection (collapsed caret or expanded range) within
+  // a single editable paragraph host, captured synchronously before React
+  // re-applies `dangerouslySetInnerHTML` and destroys it. The selection
+  // invariant restores from this (not the debounced model range, which lags),
+  // so freshly typed text isn't reversed and a drag selection isn't erased when
+  // a re-render clobbers the contentEditable.
+  const pendingEditableCaretRef = React.useRef<{
+    nodeIndex: number;
+    start: number;
+    end: number;
+  } | null>(null);
+  // Whether a pointer-driven selection drag is currently in progress (button
+  // down and moved). While true, the DOM selection is authoritative and the
+  // invariant must not touch it; once the pointer is released we may restore.
+  const pointerSelectionDragRef = React.useRef<{
+    down: boolean;
+    moved: boolean;
+  }>({ down: false, moved: false });
   const deferredCollapsedSelectionSyncTimeoutRef = React.useRef<number | null>(
     null
   );
@@ -35716,15 +35781,97 @@ export function DocxEditorViewer({
   }, [resolveParagraphBoundaryFromSelectionPoint]);
 
   const setActiveRangeFromSelection = React.useCallback((): void => {
+    // Selection-authority model (mirrors ProseMirror): while the user is
+    // actively producing input (typing / IME composition) the *DOM* selection
+    // is authoritative and the model lags by one debounced flush. While idle or
+    // after a pointer interaction the *model* is authoritative. We only ever
+    // write the model back into the DOM when the DOM selection has been
+    // destroyed by a re-render (innerHTML rewrite / remount during pagination
+    // churn) — never over a live, valid selection.
+    const session = editor.selectionSessionKind;
+    const rootElement = viewerRootRef.current;
+    const activeElement = document.activeElement;
+    const editorHasFocus = Boolean(
+      activeElement instanceof HTMLElement &&
+        activeElement.isContentEditable &&
+        rootElement &&
+        rootElement.contains(activeElement)
+    );
+
+    const liveSelection = window.getSelection();
+    // A genuine caret is anchored to a Text node (or an empty host). An element
+    // anchor inside a non-empty host, or a dropped range while the editor still
+    // holds focus, means the selection was destroyed by a DOM rewrite.
+    const anchorNode = liveSelection?.anchorNode ?? null;
+    const collapsedElementAnchor = Boolean(
+      liveSelection &&
+        liveSelection.isCollapsed &&
+        liveSelection.rangeCount > 0 &&
+        anchorNode &&
+        anchorNode.nodeType !== Node.TEXT_NODE
+    );
+    const selectionDropped = Boolean(
+      editorHasFocus && (!liveSelection || liveSelection.rangeCount === 0)
+    );
+
+    if (collapsedElementAnchor || selectionDropped) {
+      // During active text input the model is intentionally behind the DOM;
+      // forcing the (stale) model caret here is what makes a freshly typed
+      // character appear without the cursor advancing. Leave the DOM alone and
+      // let the draft / selection-preservation path own the caret.
+      if (session === "keyboard" || session === "composition") {
+        return;
+      }
+      const anchorElement =
+        anchorNode instanceof Element
+          ? anchorNode
+          : anchorNode?.parentElement ?? null;
+      const destroyedHost =
+        anchorElement?.closest<HTMLElement>(
+          "[data-docx-paragraph-host='true']"
+        ) ??
+        (editorHasFocus
+          ? (activeElement as HTMLElement).closest<HTMLElement>(
+              "[data-docx-paragraph-host='true']"
+            )
+          : null);
+      const lastGoodRange = cloneTextRange(editor.activeTextRange);
+      if (lastGoodRange && destroyedHost) {
+        const normalizedLastGood = normalizeTextRange(lastGoodRange);
+        const lastGoodHost = resolveParagraphHostElement(
+          normalizedLastGood.start.location
+        );
+        if (lastGoodHost === destroyedHost) {
+          setSelectionFromDocxBoundaries(
+            normalizedLastGood.start,
+            normalizedLastGood.end
+          );
+        }
+      }
+      // Never overwrite the model with a destroyed selection.
+      return;
+    }
+
     const range = resolveActiveRangeFromDomSelection();
     if (!range) {
+      // Don't wipe the model selection during transient churn while the editor
+      // still holds focus; only clear once focus has actually left the editor.
+      if (editorHasFocus && editor.activeTextRange) {
+        return;
+      }
       editor.setActiveTextRange(undefined);
       return;
     }
 
     clearTableCellSelection();
     editor.setActiveTextRange(range);
-  }, [clearTableCellSelection, editor, resolveActiveRangeFromDomSelection]);
+  }, [
+    clearTableCellSelection,
+    editor,
+    resolveActiveRangeFromDomSelection,
+    resolveParagraphHostElement,
+    setSelectionFromDocxBoundaries,
+  ]);
 
   const flushActiveRangeFromSelection = React.useCallback((): void => {
     if (deferredCollapsedSelectionSyncTimeoutRef.current !== null) {
@@ -35741,6 +35888,126 @@ export function DocxEditorViewer({
       setActiveRangeFromSelection();
     });
   }, [setActiveRangeFromSelection]);
+
+  // ProseMirror-style invariant: the DOM selection must follow the model. When
+  // a re-render rewrites an editable paragraph's `innerHTML` (pagination /
+  // layout churn), the browser destroys the live selection — collapsing it onto
+  // the host element or dropping it entirely. This layout effect runs
+  // synchronously after every commit (before paint and before the async
+  // `selectionchange` handler can observe and persist the destroyed selection),
+  // and re-asserts the selection from the authoritative model range whenever the
+  // DOM selection has been destroyed. It is deliberately conservative: it never
+  // touches a valid in-host selection (so it cannot fight a real caret), and it
+  // bows out entirely while the user is actively producing input — dragging a
+  // selection (pointer), composing (IME), or typing (keyboard) — where the DOM
+  // is authoritative and the model intentionally lags by one debounced flush.
+  // Re-asserting during those windows would snap the caret back to the
+  // pre-input offset (a freshly typed character would appear without the cursor
+  // advancing), so we only restore once the user is idle / after a programmatic
+  // change.
+  React.useLayoutEffect(() => {
+    if (isReadOnly) {
+      return;
+    }
+    const session = editor.selectionSessionKind;
+    // An in-progress pointer drag and IME composition own the DOM selection
+    // directly; never interfere with them. We gate on the live drag (button
+    // down + moved) rather than the whole "pointer" session, because that
+    // session lingers ~320ms after release — long enough for the mouseup
+    // re-render to clobber and "erase" the just-made selection before we could
+    // restore it.
+    if (pointerSelectionDragRef.current.moved || session === "composition") {
+      return;
+    }
+    const rootElement = viewerRootRef.current;
+    if (!rootElement) {
+      return;
+    }
+    const activeElement = document.activeElement;
+    if (
+      !(activeElement instanceof HTMLElement) ||
+      !activeElement.isContentEditable ||
+      !rootElement.contains(activeElement)
+    ) {
+      return;
+    }
+    const focusedHost = activeElement.closest<HTMLElement>(
+      "[data-docx-paragraph-host='true']"
+    );
+    if (!focusedHost) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+    const liveRange =
+      selection.rangeCount > 0 ? selection.getRangeAt(0) : undefined;
+    const anchorNode = selection.anchorNode;
+    const selectionInsideHost = Boolean(
+      liveRange &&
+        focusedHost.contains(liveRange.startContainer) &&
+        focusedHost.contains(liveRange.endContainer)
+    );
+    const anchorIsElement = Boolean(
+      anchorNode && anchorNode.nodeType !== Node.TEXT_NODE
+    );
+    const selectionWasDestroyed =
+      !liveRange ||
+      !selectionInsideHost ||
+      (selection.isCollapsed && anchorIsElement);
+    if (!selectionWasDestroyed) {
+      // The DOM selection is live and valid — leave it alone (this is the
+      // normal typing path once React did not need to rewrite innerHTML).
+      return;
+    }
+
+    // The selection was destroyed by a re-render that rewrote the editable
+    // host's innerHTML (the per-keystroke draft is fed through
+    // `dangerouslySetInnerHTML`, and React rebuilds the child nodes). Restore
+    // the caret. During active typing the authoritative position is the offset
+    // captured in `onInput` (the model range lags by a debounced flush, so
+    // using it would snap the caret backwards and reverse the typed text).
+    const focusedNodeIndexAttr = focusedHost.getAttribute(
+      "data-docx-paragraph-node-index"
+    );
+    const focusedNodeIndex =
+      focusedNodeIndexAttr != null
+        ? Number.parseInt(focusedNodeIndexAttr, 10)
+        : Number.NaN;
+    const pendingCaret = pendingEditableCaretRef.current;
+    if (
+      pendingCaret &&
+      Number.isFinite(focusedNodeIndex) &&
+      pendingCaret.nodeIndex === focusedNodeIndex
+    ) {
+      const textLength = editableTextFromElement(focusedHost).length;
+      const safeStart = Math.max(0, Math.min(pendingCaret.start, textLength));
+      const safeEnd = Math.max(
+        safeStart,
+        Math.min(pendingCaret.end, textLength)
+      );
+      setSelectionWithinElementByTextOffsets(focusedHost, safeStart, safeEnd);
+      return;
+    }
+
+    // Not actively typing this paragraph: fall back to the committed model
+    // range. Only do this when idle/programmatic — during keyboard input
+    // without a captured caret we must not force the stale model range.
+    if (session === "keyboard") {
+      return;
+    }
+    const range = editor.activeTextRange;
+    if (!range) {
+      return;
+    }
+    const normalized = normalizeTextRange(range);
+    const targetHost = resolveParagraphHostElement(normalized.start.location);
+    if (!targetHost || targetHost !== focusedHost) {
+      return;
+    }
+    setSelectionFromDocxBoundaries(normalized.start, normalized.end);
+  });
 
   const selectionIsExpandedWithinElement = React.useCallback(
     (element: HTMLElement): boolean => {
@@ -36372,6 +36639,41 @@ export function DocxEditorViewer({
           rootElement.contains(activeElement) &&
           activeElement.contains(selectionRange.startContainer)
       );
+      // Track the last valid DOM selection (collapsed caret or expanded range)
+      // within a single focused editable paragraph host, so the selection
+      // invariant can restore it after a re-render rewrites the host's
+      // innerHTML. Only capture genuine text-node anchors at both ends — an
+      // element anchor means the selection was already destroyed by a clobber,
+      // and capturing it would defeat the restore.
+      const selectionWithinSingleEditableHost = Boolean(
+        activeElement instanceof HTMLElement &&
+          activeElement.isContentEditable &&
+          rootElement.contains(activeElement) &&
+          activeElement.contains(selectionRange.startContainer) &&
+          activeElement.contains(selectionRange.endContainer) &&
+          selectionRange.startContainer.nodeType === Node.TEXT_NODE &&
+          selectionRange.endContainer.nodeType === Node.TEXT_NODE
+      );
+      if (selectionWithinSingleEditableHost && activeElement instanceof HTMLElement) {
+        const host = activeElement.closest<HTMLElement>(
+          "[data-docx-paragraph-host='true']"
+        );
+        const nodeIndexAttr = host?.getAttribute(
+          "data-docx-paragraph-node-index"
+        );
+        const offsets = host ? selectionOffsetsWithinElement(host) : undefined;
+        if (host && nodeIndexAttr != null && offsets) {
+          const nodeIndex = Number.parseInt(nodeIndexAttr, 10);
+          if (Number.isFinite(nodeIndex)) {
+            pendingEditableCaretRef.current = {
+              nodeIndex,
+              start: offsets.start,
+              end: offsets.end,
+            };
+          }
+        }
+      }
+
       if (collapsedCaretInsideEditableHost) {
         scheduleDeferredCollapsedSelectionSync();
         return;
@@ -36385,6 +36687,28 @@ export function DocxEditorViewer({
       document.removeEventListener("selectionchange", handleSelectionChange);
     };
   }, [flushActiveRangeFromSelection, scheduleDeferredCollapsedSelectionSync]);
+
+  React.useEffect(() => {
+    const onPointerDown = (): void => {
+      pointerSelectionDragRef.current = { down: true, moved: false };
+    };
+    const onPointerMove = (event: PointerEvent): void => {
+      if (pointerSelectionDragRef.current.down && event.buttons !== 0) {
+        pointerSelectionDragRef.current.moved = true;
+      }
+    };
+    const onPointerUp = (): void => {
+      pointerSelectionDragRef.current = { down: false, moved: false };
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", onPointerUp, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+    };
+  }, []);
 
   const beginCrossNodeSelectionDrag = React.useCallback(
     (
@@ -45986,6 +46310,18 @@ export function DocxEditorViewer({
               }px`,
             }
           : undefined),
+        // Carry the paragraph's run font on the editable host so text typed into
+        // it (which is a bare, not-yet-committed text node, not a styled run
+        // span) renders in the same font the committed run will use — i.e. the
+        // font shown in the toolbar — instead of inheriting a generic default.
+        // Rendered runs set their own font on their span, so this only affects
+        // freshly typed/empty content. When the paragraph has no explicit run
+        // font we leave it unset so the document default still applies.
+        ...((): React.CSSProperties => {
+          const runStyle = firstRunStyle(node);
+          const hostFontFamily = cssFontFamily(runStyle?.fontFamily);
+          return hostFontFamily ? { fontFamily: hostFontFamily } : {};
+        })(),
         outline: "none",
       };
       let fallbackParagraphRuns: React.ReactNode | undefined;
@@ -46278,6 +46614,20 @@ export function DocxEditorViewer({
               return;
             }
 
+            // Synchronously capture the post-click/drag selection (before any
+            // re-render can clobber it) so the selection invariant restores the
+            // exact position the pointer landed on, not a stale one.
+            const mouseUpOffsets = selectionOffsetsWithinElement(
+              event.currentTarget
+            );
+            if (mouseUpOffsets) {
+              pendingEditableCaretRef.current = {
+                nodeIndex,
+                start: mouseUpOffsets.start,
+                end: mouseUpOffsets.end,
+              };
+            }
+
             if (selectionIsExpandedWithinElement(event.currentTarget)) {
               flushActiveRangeFromSelection();
               cancelPendingPointerSelectionReconcile();
@@ -46325,6 +46675,18 @@ export function DocxEditorViewer({
               nodeIndex,
               event.currentTarget.innerHTML
             );
+            // Capture the live caret offset now (post-insert, pre-render) so the
+            // selection invariant can restore it after React rewrites innerHTML.
+            const typedOffsets = selectionOffsetsWithinElement(
+              event.currentTarget
+            );
+            pendingEditableCaretRef.current = typedOffsets
+              ? {
+                  nodeIndex,
+                  start: typedOffsets.start,
+                  end: typedOffsets.end,
+                }
+              : null;
           }}
           onCompositionStart={() => {
             if (!editable) {
