@@ -39604,6 +39604,10 @@ export function DocxEditorViewer({
       return;
     }
 
+    const rootElement = viewerRootRef.current;
+    const zoomScale = rootElement
+      ? resolveEffectiveZoomScale(rootElement)
+      : virtualizerMeasurementScale;
     const nextMeasuredHeights: Record<number, number[]> = {};
     editor.model.nodes.forEach((node, nodeIndex) => {
       if (node.type !== "table") {
@@ -39625,7 +39629,12 @@ export function DocxEditorViewer({
         ) {
           return;
         }
-        const normalizedHeight = normalizeMeasuredTableRowHeightPx(rowHeightPx);
+        const documentRowHeightPx =
+          Number.isFinite(zoomScale) && zoomScale > 0
+            ? rowHeightPx / zoomScale
+            : rowHeightPx;
+        const normalizedHeight =
+          normalizeMeasuredTableRowHeightPx(documentRowHeightPx);
         const previousHeight = measuredByRowIndex.get(normalizedRowIndex);
         measuredByRowIndex.set(
           normalizedRowIndex,
@@ -39778,6 +39787,7 @@ export function DocxEditorViewer({
     tableColumnWidths,
     tableRowHeights,
     tableDraftLayoutEpoch,
+    virtualizerMeasurementScale,
     visibleTableRowIndexesByNodeIndex,
   ]);
 
