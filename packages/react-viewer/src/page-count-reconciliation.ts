@@ -30,23 +30,29 @@ export function shouldAllowStoredPageCountReduction(options: {
     return true;
   }
 
+  const renderedBreakHintPageCount = Number.isFinite(
+    options.renderedBreakHintPageCount
+  )
+    ? Math.max(1, Math.round(options.renderedBreakHintPageCount as number))
+    : undefined;
+  const renderedBreakHintsSupportTarget =
+    options.hasLastRenderedPageBreakHints === true &&
+    renderedBreakHintPageCount !== undefined &&
+    targetPageCount >= renderedBreakHintPageCount;
+
   if (options.hasMeasuredBodyFooterOverlap === true) {
-    return false;
+    // Word's own rendered break markers outrank a measured body/footer
+    // overlap. Dense documents can legitimately overflow our estimated footer
+    // reserve on every page; abandoning the hint-aligned page count for the
+    // (over-)estimated one trades a correct page count for a wrong one.
+    return renderedBreakHintsSupportTarget;
   }
 
   if (options.hasLastRenderedPageBreakHints !== true) {
     return true;
   }
 
-  const renderedBreakHintPageCount = Number.isFinite(
-    options.renderedBreakHintPageCount
-  )
-    ? Math.max(1, Math.round(options.renderedBreakHintPageCount as number))
-    : undefined;
-  return (
-    renderedBreakHintPageCount !== undefined &&
-    targetPageCount >= renderedBreakHintPageCount
-  );
+  return renderedBreakHintsSupportTarget;
 }
 
 export function shouldLatchMeasuredBodyFooterOverlap(options: {
@@ -251,6 +257,21 @@ export function reconcilePageCountCandidateToTargetCountByScalingHeight<TPage>(
     }
     previousScale = scale;
     previousPageCount = candidate.pageCount;
+  }
+
+  if (!needMorePages && selectedCandidate.pageCount !== safeTargetPageCount) {
+    // A compressed pagination that still misses the stored count keeps the
+    // wrong page count AND over-fills every page: its segments were budgeted
+    // against a taller virtual page than the physical one they render in, so
+    // the tail of each page gets clipped (stale generator page counts, e.g. a
+    // never-repaginated <Pages>1</Pages>, would otherwise squeeze multi-page
+    // documents). Best-effort only helps in the page-growing direction, where
+    // pages under-fill harmlessly.
+    return {
+      pageCount: initialPageCount,
+      pages: initialPages,
+      scale: 1,
+    };
   }
 
   return selectedCandidate;

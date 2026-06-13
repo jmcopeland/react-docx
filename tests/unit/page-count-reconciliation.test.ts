@@ -57,6 +57,24 @@ describe("page-count-reconciliation", () => {
     expect(reconciled).toBe(initialPages);
   });
 
+  it("keeps the original pagination when no scale reaches a smaller stored count", () => {
+    // A stale generator page count (e.g. a never-repaginated <Pages>1</Pages>)
+    // that scaling cannot actually reach must not leave a partially compressed
+    // pagination behind: those pages were budgeted against a taller virtual
+    // page than the physical one and render clipped.
+    const initialPages = [["page-1"], ["page-2"], ["page-3"], ["page-4"]];
+    const reconciledCandidate =
+      reconcilePageCountCandidateToTargetCountByScalingHeight({
+        initialPages,
+        targetPageCount: 1,
+        buildPagesAtScale: (scale) =>
+          scale >= 1.2 ? [["page-1"], ["page-2"]] : initialPages,
+      });
+
+    expect(reconciledCandidate.pages).toBe(initialPages);
+    expect(reconciledCandidate.scale).toBe(1);
+  });
+
   it("respects custom candidate scales when narrowing an over-pagination case", () => {
     const initialPages = [["page-1"], ["page-2"], ["page-3"]];
     const reconciled = reconcilePagesToTargetCountByScalingHeight({
@@ -167,6 +185,35 @@ describe("page-count-reconciliation", () => {
       shouldAllowStoredPageCountReduction({
         estimatedPageCount: 3,
         targetPageCount: 2,
+        hasMeasuredBodyFooterOverlap: true,
+      })
+    ).toBe(false);
+  });
+
+  it("keeps reducing despite measured footer overlap when rendered break hints support the stored page count", () => {
+    // Regression: 8256f805 (Fannie Mae form 3141) — Word renders 3 pages with
+    // 2 mid-paragraph lastRenderedPageBreak markers. The dense pages measure
+    // as overlapping the estimated footer reserve, but the hint-aligned
+    // 3-page plan is Word's own truth and must not be abandoned for the
+    // over-estimated 5-page layout.
+    expect(
+      shouldAllowStoredPageCountReduction({
+        estimatedPageCount: 5,
+        targetPageCount: 3,
+        hasLastRenderedPageBreakHints: true,
+        renderedBreakHintPageCount: 3,
+        hasMeasuredBodyFooterOverlap: true,
+      })
+    ).toBe(true);
+  });
+
+  it("still blocks reduction on measured footer overlap when hints contradict the stored page count", () => {
+    expect(
+      shouldAllowStoredPageCountReduction({
+        estimatedPageCount: 5,
+        targetPageCount: 3,
+        hasLastRenderedPageBreakHints: true,
+        renderedBreakHintPageCount: 4,
         hasMeasuredBodyFooterOverlap: true,
       })
     ).toBe(false);

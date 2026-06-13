@@ -19,6 +19,34 @@ pnpm add @extend-ai/react-docx react react-dom
 
 `react` and `react-dom` are peer dependencies.
 
+## WebAssembly Asset
+
+DOCX parsing and serialization run in a Rust/WebAssembly module that ships inside this package as `dist/docx_wasm_bg.wasm` (~2.5 MB raw, ~1 MB over the wire with gzip). It is **not** part of the JavaScript bundle:
+
+- It loads lazily, on the first call that parses or serializes a document.
+- The loader references it as `new URL("./docx_wasm_bg.wasm", import.meta.url)`, which Vite, webpack 5, Rollup, and Next.js automatically emit as a hashed static asset — no configuration needed.
+- In Node (SSR, tests, scripts) the binary is read from `node_modules` on disk.
+
+If you need to host the binary somewhere else (e.g. a CDN), override the source before the first parse:
+
+```ts
+import { setWasmSource } from "@extend-ai/react-docx";
+
+setWasmSource("https://cdn.example.com/docx_wasm_bg.wasm");
+// or pass a URL, Response, ArrayBuffer/TypedArray, or compiled WebAssembly.Module
+```
+
+The binary is also exposed as a package subpath, so with Vite you can do:
+
+```ts
+import wasmUrl from "@extend-ai/react-docx/docx_wasm_bg.wasm?url";
+import { setWasmSource } from "@extend-ai/react-docx";
+
+setWasmSource(wasmUrl);
+```
+
+You can also call `initWasm()` (optionally with a source) ahead of time to warm the module before the first document is opened.
+
 ## Main Entry Points
 
 The package exports two useful levels of API:
@@ -130,7 +158,7 @@ export function EditorExample() {
 
 ## Thumbnail Hook
 
-The library can expose page thumbnails from mounted viewer surfaces so you can build your own page strip, mini-map, or navigation UI.
+The library can expose page thumbnails so you can build your own page strip, mini-map, or navigation UI. Thumbnail painting can render from the live page surface when it is mounted, or from an offscreen one-page surface when viewer virtualization has unmounted that page.
 
 ```tsx
 import * as React from "react";
@@ -146,6 +174,11 @@ export function ThumbnailExample() {
     maxWidthPx: 160,
     maxHeightPx: 220,
     pixelRatio: 2,
+    minRasterIntervalMs: 40,
+    renderWindow: {
+      visiblePageIndexes: [0, 1, 2],
+      prefetchPageIndexes: [3, 4, 5],
+    },
   });
 
   return (
@@ -166,10 +199,7 @@ export function ThumbnailExample() {
         ))}
       </div>
 
-      <DocxEditorViewer
-        editor={editor}
-        pageVirtualization={{ enabled: false }}
-      />
+      <DocxEditorViewer editor={editor} />
     </div>
   );
 }
@@ -177,10 +207,11 @@ export function ThumbnailExample() {
 
 Notes:
 
-- Thumbnails are produced from mounted page DOM.
+- Thumbnail canvases can stay attached in a virtualized sidebar; only canvases you mount request paint work.
+- Use `renderWindow.visiblePageIndexes` for thumbnails currently visible in your sidebar, and `renderWindow.prefetchPageIndexes` to warm nearby pages after visible work.
+- `minRasterIntervalMs` controls repeat renders for the same canvas. Lower values are useful when the consumer already limits thumbnail work to a small visible window.
 - Thumbnail sizing is bounded by `maxWidthPx` and `maxHeightPx`, so downstream UIs can bias toward portrait thumbnail rails.
-- If page virtualization is enabled, offscreen pages can report `status: "unavailable"`.
-- For a full thumbnail rail, disable virtualization or manage the visible page range yourself.
+- Thumbnails use a direct layout/model canvas renderer first; if a page has no usable snapshot, the hook falls back to an isolated offscreen page surface.
 
 ## Useful Hooks
 
