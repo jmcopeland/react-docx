@@ -969,11 +969,13 @@ const BASE_DOC_STYLE: React.CSSProperties = {
 };
 
 const TRACKED_CHANGE_GUTTER_WIDTH_PX = 300;
-const TRACKED_CHANGE_GUTTER_CARD_LEFT_PX = 14;
+const TRACKED_CHANGE_GUTTER_CARD_LEFT_PX = 48;
 const TRACKED_CHANGE_GUTTER_CARD_RIGHT_PX = 12;
 const TRACKED_CHANGE_GUTTER_CARD_GAP_PX = 4;
 const TRACKED_CHANGE_GUTTER_CARD_MIN_HEIGHT_PX = 30;
 const TRACKED_CHANGE_GUTTER_BEND_OFFSET_PX = 8;
+const TRACKED_CHANGE_GUTTER_CONNECTOR_LANE_GAP_PX = 7;
+const TRACKED_CHANGE_GUTTER_CONNECTOR_LANE_COUNT = 5;
 const INITIAL_PAGINATION_STABILITY_IDLE_MS = 240;
 
 function scheduleDomWrite(callback: () => void): void {
@@ -23369,6 +23371,7 @@ interface PositionedGutterAnnotation {
   anchorY: number;
   top: number;
   heightPx: number;
+  connectorLane: number;
 }
 
 function estimateTrackedChangeCardHeight(change: DocxTrackedChange): number {
@@ -23377,6 +23380,63 @@ function estimateTrackedChangeCardHeight(change: DocxTrackedChange): number {
     trackedChangeKindLabel(change.kind);
   const lines = Math.min(2, Math.max(1, Math.ceil(snippet.length / 42)));
   return Math.max(TRACKED_CHANGE_GUTTER_CARD_MIN_HEIGHT_PX, 22 + lines * 11);
+}
+
+function assignGutterConnectorLanes(
+  entries: PositionedGutterAnnotation[]
+): void {
+  if (entries.length <= 1) {
+    entries.forEach((entry) => {
+      entry.connectorLane = 0;
+    });
+    return;
+  }
+
+  const intervalPaddingPx = 3;
+  const laneEndY = Array.from(
+    { length: TRACKED_CHANGE_GUTTER_CONNECTOR_LANE_COUNT },
+    () => Number.NEGATIVE_INFINITY
+  );
+  const routedEntries = entries
+    .map((entry, index) => {
+      const cardCenterY = entry.top + entry.heightPx / 2;
+      return {
+        entry,
+        index,
+        startY: Math.min(entry.anchorY, cardCenterY) - intervalPaddingPx,
+        endY: Math.max(entry.anchorY, cardCenterY) + intervalPaddingPx,
+      };
+    })
+    .sort((left, right) => {
+      const startDelta = left.startY - right.startY;
+      if (startDelta !== 0) {
+        return startDelta;
+      }
+
+      const endDelta = left.endY - right.endY;
+      if (endDelta !== 0) {
+        return endDelta;
+      }
+
+      return left.index - right.index;
+    });
+
+  routedEntries.forEach((route) => {
+    let laneIndex = laneEndY.findIndex(
+      (laneEnd) => route.startY > laneEnd + intervalPaddingPx
+    );
+
+    if (laneIndex < 0) {
+      laneIndex = laneEndY.reduce(
+        (bestLane, laneEnd, index) =>
+          laneEnd < laneEndY[bestLane] ? index : bestLane,
+        0
+      );
+    }
+
+    route.entry.connectorLane = laneIndex;
+    laneEndY[laneIndex] = Math.max(laneEndY[laneIndex], route.endY);
+  });
 }
 
 function layoutTrackedChangesForPage(
@@ -23429,6 +23489,7 @@ function layoutTrackedChangesForPage(
       ),
       top: 0,
       heightPx,
+      connectorLane: 0,
     };
   });
 
@@ -23468,6 +23529,8 @@ function layoutTrackedChangesForPage(
         entry.top + entry.heightPx + TRACKED_CHANGE_GUTTER_CARD_GAP_PX;
     });
   }
+
+  assignGutterConnectorLanes(withAnchors);
 
   return withAnchors;
 }
@@ -55648,9 +55711,18 @@ export function DocxEditorViewer({
                     const cardAttachX =
                       pageLayout.pageWidthPx +
                       TRACKED_CHANGE_GUTTER_CARD_LEFT_PX;
+                    const maxConnectorLaneOffset = Math.max(
+                      TRACKED_CHANGE_GUTTER_BEND_OFFSET_PX,
+                      TRACKED_CHANGE_GUTTER_CARD_LEFT_PX - 6
+                    );
+                    const connectorLaneOffset = Math.min(
+                      TRACKED_CHANGE_GUTTER_BEND_OFFSET_PX +
+                        Math.max(0, entry.connectorLane) *
+                          TRACKED_CHANGE_GUTTER_CONNECTOR_LANE_GAP_PX,
+                      maxConnectorLaneOffset
+                    );
                     const gutterBendX =
-                      pageLayout.pageWidthPx +
-                      TRACKED_CHANGE_GUTTER_BEND_OFFSET_PX;
+                      pageLayout.pageWidthPx + connectorLaneOffset;
                     const cardCenterY = clampNumber(
                       Math.round(entry.top + entry.heightPx / 2),
                       8,
@@ -55902,6 +55974,7 @@ export function DocxEditorViewer({
                       data-docx-gutter-annotation-id={entry.annotation.id}
                       data-docx-gutter-anchor-x={Math.round(entry.anchorX)}
                       data-docx-gutter-anchor-y={Math.round(entry.anchorY)}
+                      data-docx-gutter-connector-lane={entry.connectorLane}
                       ref={(element) => {
                         const elementKey = `${pageIndex}:${entry.annotation.id}`;
                         if (element) {
