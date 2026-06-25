@@ -36098,6 +36098,8 @@ export function DocxEditorViewer({
       return;
     }
 
+    const rootElement = viewerRootRef.current;
+    const zoomScale = resolveViewerMeasurementZoomScale(rootElement, 1);
     const nextHeightsByPage = trackedChangesByPage.map(
       (annotations, pageIndex) => {
         const pageHeights = new Map<string, number>();
@@ -36110,7 +36112,7 @@ export function DocxEditorViewer({
           }
 
           const measuredHeight = Math.round(
-            cardElement.getBoundingClientRect().height
+            cardElement.getBoundingClientRect().height / zoomScale
           );
           if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) {
             return;
