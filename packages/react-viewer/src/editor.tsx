@@ -54147,17 +54147,35 @@ export function DocxEditorViewer({
                 zIndex: 0,
               }
             : undefined;
+        const pageTrackedChanges =
+          positionedTrackedChangesByPage[pageIndex] ?? [];
+        const pageGutterContentHeightPx =
+          showTrackedChangeGutter && pageTrackedChanges.length > 0
+            ? pageTrackedChanges.reduce((maxBottomPx, entry) => {
+                return Math.max(
+                  maxBottomPx,
+                  Math.ceil(
+                    entry.top +
+                      entry.heightPx +
+                      TRACKED_CHANGE_GUTTER_CARD_GAP_PX +
+                      8
+                  )
+                );
+              }, pageLayout.pageHeightPx)
+            : pageLayout.pageHeightPx;
+        const pageVisualHeightPx = Math.max(
+          pageLayout.pageHeightPx,
+          pageGutterContentHeightPx
+        );
         const pageSurfaceStyle: React.CSSProperties = {
           ...pageSurfaceBaseStyle,
           width: pageLayout.pageWidthPx,
-          height: pageLayout.pageHeightPx,
-          minHeight: pageLayout.pageHeightPx,
+          height: pageVisualHeightPx,
+          minHeight: pageVisualHeightPx,
           backgroundColor: resolvedPageSurfaceBackgroundColor,
           position: "relative",
           ...pageMarginPaddingStyle(pageLayout.marginsPx),
         };
-        const pageTrackedChanges =
-          positionedTrackedChangesByPage[pageIndex] ?? [];
         const pageCoverBackgroundImages = (() => {
           const collected = new Map<
             string,
@@ -54221,7 +54239,7 @@ export function DocxEditorViewer({
             style={{
               position: "relative",
               width: pageWrapperWidthPx,
-              minHeight: pageLayout.pageHeightPx,
+              minHeight: pageVisualHeightPx,
               margin: "0 auto",
               // Isolate per-page layout/style recalculation so scrolling and
               // edits on one page don't force whole-document layout passes.
@@ -55654,7 +55672,7 @@ export function DocxEditorViewer({
                   left: pageLayout.pageWidthPx,
                   top: 0,
                   width: TRACKED_CHANGE_GUTTER_WIDTH_PX,
-                  height: pageLayout.pageHeightPx,
+                  height: pageVisualHeightPx,
                   backgroundColor: resolvedPageSurfaceBackgroundColor,
                   pointerEvents: "none",
                   overflow: "visible",
@@ -55675,10 +55693,10 @@ export function DocxEditorViewer({
                   width={
                     pageLayout.pageWidthPx + TRACKED_CHANGE_GUTTER_WIDTH_PX
                   }
-                  height={pageLayout.pageHeightPx}
+                  height={pageVisualHeightPx}
                   viewBox={`0 0 ${
                     pageLayout.pageWidthPx + TRACKED_CHANGE_GUTTER_WIDTH_PX
-                  } ${pageLayout.pageHeightPx}`}
+                  } ${pageVisualHeightPx}`}
                   style={{
                     position: "absolute",
                     top: 0,
@@ -55726,7 +55744,7 @@ export function DocxEditorViewer({
                     const cardCenterY = clampNumber(
                       Math.round(entry.top + entry.heightPx / 2),
                       8,
-                      Math.max(8, pageLayout.pageHeightPx - 8)
+                      Math.max(8, pageVisualHeightPx - 8)
                     );
                     const connectorPath =
                       Math.abs(cardCenterY - anchorY) <= 2
