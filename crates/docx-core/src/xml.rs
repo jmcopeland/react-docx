@@ -149,12 +149,59 @@ fn find_tag_tokens(xml: &str, tag_name: &str) -> Vec<(usize, usize, bool)> {
     tokens
 }
 
+fn decode_xml_entity(entity: &str) -> Option<String> {
+    match entity {
+        "lt" => return Some("<".to_string()),
+        "gt" => return Some(">".to_string()),
+        "quot" => return Some("\"".to_string()),
+        "apos" => return Some("'".to_string()),
+        "amp" => return Some("&".to_string()),
+        _ => {}
+    }
+
+    let (digits, radix) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+        .map(|digits| (digits, 16))
+        .or_else(|| entity.strip_prefix('#').map(|digits| (digits, 10)))?;
+    if digits.is_empty() {
+        return None;
+    }
+
+    let code_point = u32::from_str_radix(digits, radix).ok()?;
+    if code_point == 0 {
+        return None;
+    }
+    char::from_u32(code_point).map(|character| character.to_string())
+}
+
 pub fn decode_xml_entities(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    let Some(first_ampersand) = text.find('&') else {
+        return text.to_string();
+    };
+
+    let mut decoded = String::with_capacity(text.len());
+    decoded.push_str(&text[..first_ampersand]);
+
+    let mut remaining = &text[first_ampersand..];
+    while let Some(ampersand_index) = remaining.find('&') {
+        decoded.push_str(&remaining[..ampersand_index]);
+        let after_ampersand = &remaining[ampersand_index + 1..];
+
+        if let Some(semicolon_index) = after_ampersand.find(';') {
+            let entity = &after_ampersand[..semicolon_index];
+            if let Some(value) = decode_xml_entity(entity) {
+                decoded.push_str(&value);
+                remaining = &after_ampersand[semicolon_index + 1..];
+                continue;
+            }
+        }
+
+        decoded.push('&');
+        remaining = after_ampersand;
+    }
+    decoded.push_str(remaining);
+    decoded
 }
 
 pub fn extract_balanced_tag_ranges(xml: &str, tag_name: &str) -> Vec<TagRange> {
@@ -455,6 +502,10 @@ mod tests {
         assert_eq!(decode_xml_entities("a&amp;b"), "a&b");
         assert_eq!(decode_xml_entities("&lt;tag&gt;"), "<tag>");
         assert_eq!(decode_xml_entities("&quot;x&apos;"), "\"x'");
+        assert_eq!(decode_xml_entities("&#8226;"), "•");
+        assert_eq!(decode_xml_entities("&#x2022;"), "•");
+        assert_eq!(decode_xml_entities("&amp;#8226;"), "&#8226;");
+        assert_eq!(decode_xml_entities("&not-an-entity;"), "&not-an-entity;");
     }
 
     #[test]

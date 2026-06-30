@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildDocModel } from "@extend-ai/react-docx-doc-model";
 import { parseDocx } from "@extend-ai/react-docx-ooxml-core";
+import { buildParagraphNumberingLabels } from "../../packages/react-viewer/src/editor";
 import { createZip } from "./helpers/zip";
 
 const RED_TEXT_DOC_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1480,6 +1481,37 @@ const NUMBERING_DOC_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"
   </w:num>
 </w:numbering>`;
 
+const BULLET_ENTITY_LIST_DOC_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr>
+        <w:numPr>
+          <w:ilvl w:val="0"/>
+          <w:numId w:val="1"/>
+        </w:numPr>
+      </w:pPr>
+      <w:r><w:t>Bullet item</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>`;
+
+const BULLET_ENTITY_NUMBERING_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/>
+      <w:numFmt w:val="bullet"/>
+      <w:lvlText w:val="&#8226;"/>
+      <w:lvlJc w:val="left"/>
+      <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1">
+    <w:abstractNumId w:val="0"/>
+  </w:num>
+</w:numbering>`;
+
 const CONTENT_TYPES_WITH_NUMBERING_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -1652,6 +1684,26 @@ describe("doc-model import", () => {
     expect(abstractNumber?.levels[1]?.indent?.leftTwips).toBe(1440);
     expect(abstractNumber?.levels[2]?.indent?.leftTwips).toBe(2160);
     expect(abstractNumber?.levels[1]?.runStyle?.color?.toLowerCase()).toBe("#7030a0");
+  });
+
+  it("decodes numeric XML character references in numbering level text", async () => {
+    const zip = createZip([
+      { name: "[Content_Types].xml", content: CONTENT_TYPES_WITH_NUMBERING_XML },
+      { name: "_rels/.rels", content: ROOT_RELS_XML },
+      { name: "word/document.xml", content: BULLET_ENTITY_LIST_DOC_XML },
+      { name: "word/_rels/document.xml.rels", content: DOCUMENT_RELS_WITH_NUMBERING_XML },
+      { name: "word/numbering.xml", content: BULLET_ENTITY_NUMBERING_XML }
+    ]);
+
+    const pkg = await parseDocx(zip);
+    const model = await buildDocModel(pkg);
+    const abstractNumber = model.metadata.numberingDefinitions?.abstracts.find(
+      (candidate) => candidate.abstractNumId === 0
+    );
+
+    expect(abstractNumber?.levels[0]?.format).toBe("bullet");
+    expect(abstractNumber?.levels[0]?.text).toBe("\u2022");
+    expect(buildParagraphNumberingLabels(model).get("p:0")?.text).toBe("\u2022");
   });
 
   it("imports hyperlink runs with external targets", async () => {

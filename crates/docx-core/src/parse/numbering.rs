@@ -211,7 +211,10 @@ pub fn parse_numbering_level_definition(
             .as_deref()
             .and_then(|tag| parse_integer_attribute(tag, "w:val")),
         format: num_fmt_tag.as_deref().and_then(|tag| get_attribute(tag, "w:val")),
-        text: lvl_text_tag.as_deref().and_then(|tag| get_attribute(tag, "w:val")),
+        text: lvl_text_tag
+            .as_deref()
+            .and_then(|tag| get_attribute(tag, "w:val"))
+            .and_then(|value| decode_xml_attribute(Some(&value))),
         suffix,
         indent,
         run_style: level_run_style,
