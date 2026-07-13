@@ -8698,6 +8698,35 @@ function updateEstimatedLineWidthPxForText(
   return estimateTextAdvanceWidthPx(trailingSegment, style);
 }
 
+// Canvas-accurate analog of updateEstimatedLineWidthPxForText. The per-character
+// heuristic used above over-estimates long lowercase runs, which is harmless for
+// wrap counting but shifts explicit tab-stop columns: a tab is rendered as a
+// fixed-width spacer of (tabStop - runningWidth), while the preceding text lays
+// out at its real width, so any running-width error drags the column off the
+// stop. Paragraphs with explicit tab stops therefore track their running width
+// with the same canvas metrics the text actually renders at, keeping tabbed
+// columns aligned across wrapped/broken lines (extend-hq/react-docx#15).
+function updateMeasuredLineWidthPxForText(
+  currentLineWidthPx: number,
+  text: string,
+  style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
+  paragraphBaseFontPx: number
+): number {
+  if (!text) {
+    return currentLineWidthPx;
+  }
+
+  if (!text.includes("\n")) {
+    return (
+      currentLineWidthPx + measureTextWidthPx(text, style, paragraphBaseFontPx)
+    );
+  }
+
+  const segments = text.split("\n");
+  const trailingSegment = segments[segments.length - 1] ?? "";
+  return measureTextWidthPx(trailingSegment, style, paragraphBaseFontPx);
+}
+
 function resolveTabSpacerWidthPx(
   tabStopPositionsPx: number[],
   currentLineWidthPx: number,
@@ -19238,6 +19267,8 @@ function renderParagraphRuns(
         Number.isFinite(value) && (value as number) > 0
     )
     .sort((left, right) => left - right);
+  const hasExplicitTabStops = tabStopPositionsPx.length > 0;
+  const paragraphBaseFontPx = paragraphBaseFontSizePx(paragraph);
   let hasTabSplit = false;
   let tabLeaderColor: string | undefined;
   const showTrackedChanges = options?.showTrackedChanges === true;
@@ -19366,11 +19397,18 @@ function renderParagraphRuns(
     if (!shouldTrackTabLineWidth) {
       return;
     }
-    approximateLineWidthPx = updateEstimatedLineWidthPxForText(
-      approximateLineWidthPx,
-      text,
-      style
-    );
+    approximateLineWidthPx = hasExplicitTabStops
+      ? updateMeasuredLineWidthPxForText(
+          approximateLineWidthPx,
+          text,
+          style,
+          paragraphBaseFontPx
+        )
+      : updateEstimatedLineWidthPxForText(
+          approximateLineWidthPx,
+          text,
+          style
+        );
   };
   const trackInlineAdvance = (widthPx: number): void => {
     if (!shouldTrackTabLineWidth) {
@@ -48877,16 +48915,24 @@ export function DocxEditorViewer({
         )
         .sort((left, right) => left - right);
       const compactTabStopFieldLayout = tabStopPositionsPx.length > 0;
+      const paragraphBaseFontPx = paragraphBaseFontSizePx(paragraph);
       let approximateLineWidthPx = 0;
       const trackTextAdvance = (
         text: string,
         style?: TextRunNode["style"] | FormFieldRunNode["style"]
       ): void => {
-        approximateLineWidthPx = updateEstimatedLineWidthPxForText(
-          approximateLineWidthPx,
-          text,
-          style
-        );
+        approximateLineWidthPx = compactTabStopFieldLayout
+          ? updateMeasuredLineWidthPxForText(
+              approximateLineWidthPx,
+              text,
+              style,
+              paragraphBaseFontPx
+            )
+          : updateEstimatedLineWidthPxForText(
+              approximateLineWidthPx,
+              text,
+              style
+            );
       };
       const trackInlineAdvance = (widthPx: number): void => {
         approximateLineWidthPx += Math.max(0, Math.round(widthPx));
