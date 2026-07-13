@@ -10597,8 +10597,13 @@ function estimateWrappedLineCountForParagraph(
     !useTabLeaderLayout && anchoredTabLayout === "center";
   const useRightTabLayout =
     !useTabLeaderLayout && anchoredTabLayout === "right";
+  const useLeftRightTabLayout =
+    !useTabLeaderLayout && anchoredTabLayout === "left-right";
   const useAnchoredTabLayout =
-    useCenterRightTabLayout || useCenterTabLayout || useRightTabLayout;
+    useCenterRightTabLayout ||
+    useCenterTabLayout ||
+    useRightTabLayout ||
+    useLeftRightTabLayout;
   const paragraphEligibleForPlainPretextLineCount =
     !paragraph.style?.indent &&
     firstLineMaxWidthPx === maxLineWidthPx &&
@@ -17037,7 +17042,12 @@ function paragraphTabCharacterCount(paragraph: ParagraphNode): number {
   }, 0);
 }
 
-type ParagraphAnchoredTabLayout = "none" | "center-right" | "center" | "right";
+type ParagraphAnchoredTabLayout =
+  | "none"
+  | "center-right"
+  | "center"
+  | "right"
+  | "left-right";
 
 function paragraphAnchoredTabLayout(
   paragraph: ParagraphNode,
@@ -17051,6 +17061,14 @@ function paragraphAnchoredTabLayout(
   const hasRight = tabStops.some((tabStop) => tabStop.alignment === "right");
   const tabCount = paragraphTabCharacterCount(paragraph);
   const withinHeaderFooter = options?.withinHeaderFooter === true;
+
+  // A left tab combined with a right tab (no center) is the classic two-column
+  // signature-block layout: a left column at the left tab and a right-aligned
+  // trailer at the right tab. Anchor it instead of falling back to the plain
+  // left-only tab path (which would treat the right tab as left and mis-wrap).
+  if (hasLeft && hasRight && !hasCenter && tabCount >= 2) {
+    return "left-right";
+  }
 
   if (hasLeft && (hasCenter || hasRight)) {
     return "none";
@@ -17077,7 +17095,7 @@ function paragraphAnchoredTabLayout(
 
 function paragraphFirstTabStopPx(
   paragraph: ParagraphNode,
-  alignment: "center" | "right"
+  alignment: "left" | "center" | "right"
 ): number | undefined {
   return (paragraph.style?.tabStops ?? [])
     .filter((tabStop) => tabStop.alignment === alignment)
@@ -19219,8 +19237,13 @@ function renderParagraphRuns(
     !useTabLeaderLayout && anchoredTabLayout === "center";
   const useRightTabLayout =
     !useTabLeaderLayout && anchoredTabLayout === "right";
+  const useLeftRightTabLayout =
+    !useTabLeaderLayout && anchoredTabLayout === "left-right";
   const useAnchoredTabLayout =
-    useCenterRightTabLayout || useCenterTabLayout || useRightTabLayout;
+    useCenterRightTabLayout ||
+    useCenterTabLayout ||
+    useRightTabLayout ||
+    useLeftRightTabLayout;
   const pageFieldSequence = paragraphPageFieldSequence(paragraph);
   const pageFieldValueSequence = paragraphPageFieldValueSequence(paragraph);
   const styleRefFieldValueSequence =
@@ -20434,6 +20457,74 @@ function renderParagraphRuns(
         : runsLeft
       : runs;
     appendTrackedDeletionSegments(trailingTarget, `${keyPrefix}-tail`);
+  }
+
+  if (useLeftRightTabLayout) {
+    // Two-column signature-block layout: zone 0 at the left margin, zone 1
+    // left-aligned starting at the left tab, zone 2 right-aligned ending at the
+    // right tab. Grid columns are anchored at the tab-stop positions.
+    const zones = buildAnchoredTabZones(3);
+    const leftStopPx = Math.max(
+      0,
+      Math.round(paragraphFirstTabStopPx(paragraph, "left") ?? 0)
+    );
+    const rightStopPx = Math.max(
+      leftStopPx,
+      Math.round(paragraphFirstTabStopPx(paragraph, "right") ?? leftStopPx)
+    );
+
+    return (
+      <div
+        key={`${keyPrefix}-left-right-tabs`}
+        data-docx-tab-layout="left-right"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `${leftStopPx}px 0px ${Math.max(
+            0,
+            rightStopPx - leftStopPx
+          )}px 0px minmax(0, 1fr)`,
+          alignItems: "start",
+          width: "100%",
+        }}
+      >
+        <span
+          data-docx-tab-zone="0"
+          style={{
+            ...anchoredTabZoneStyle,
+            gridColumn: "1 / 2",
+            gridRow: "1 / 2",
+            justifySelf: "start",
+          }}
+        >
+          {zones[0]}
+        </span>
+        <span
+          data-docx-tab-zone="1"
+          style={{
+            ...anchoredTabZoneStyle,
+            gridColumn: "3 / -1",
+            gridRow: "1 / 2",
+            justifySelf: "start",
+            textAlign: "left",
+          }}
+        >
+          {zones[1]}
+        </span>
+        <span
+          data-docx-tab-zone="2"
+          style={{
+            ...anchoredTabZoneStyle,
+            gridColumn: "1 / 4",
+            gridRow: "1 / 2",
+            justifySelf: "end",
+            justifyContent: "flex-end",
+            textAlign: "right",
+          }}
+        >
+          {zones[2]}
+        </span>
+      </div>
+    );
   }
 
   if (useCenterRightTabLayout) {
@@ -49104,7 +49195,8 @@ export function DocxEditorViewer({
         paragraphUsesTabLeaders(paragraph) ||
         anchoredTabLayout === "center-right" ||
         anchoredTabLayout === "center" ||
-        anchoredTabLayout === "right";
+        anchoredTabLayout === "right" ||
+        anchoredTabLayout === "left-right";
       const hasFixedPositionWrappedImage = paragraph.children.some(
         (child) =>
           child.type === "image" && isFixedPositionWrappedFloatingImage(child)
