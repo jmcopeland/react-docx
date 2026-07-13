@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://extend.ai/schemas/react-docx/word-oracle-manifest-v1.schema.json",
+  "title": "react-docx Microsoft Word oracle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "corpus", "captureProfiles", "cases"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "corpus": {
+      "$ref": "#/$defs/corpus"
+    },
+    "captureProfiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/captureProfile"
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\)(?!.*//).+$"
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "captureProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pdfExport", "rasterization"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pdfExport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "markup", "updateFields", "pdfa"],
+          "properties": {
+            "mode": {
+              "enum": ["print", "screen"]
+            },
+            "markup": {
+              "enum": ["final", "final-with-markup"]
+            },
+            "updateFields": {
+              "type": "boolean"
+            },
+            "pdfa": {
+              "type": "boolean"
+            }
+          }
+        },
+        "rasterization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dpi", "pageBox", "format", "background"],
+          "properties": {
+            "dpi": {
+              "type": "integer",
+              "minimum": 72,
+              "maximum": 600
+            },
+            "pageBox": {
+              "enum": ["crop", "media"]
+            },
+            "format": {
+              "const": "png"
+            },
+            "background": {
+              "const": "#ffffff"
+            }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/portablePath"
+            },
+            {
+              "type": "string",
+              "pattern": "\\.[dD][oO][cC][xX]$"
+            }
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["widthPoints", "heightPoints", "rotation"],
+      "properties": {
+        "widthPoints": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "heightPoints": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rotation": {
+          "enum": [0, 90, 180, 270]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "mediaType", "pageCount", "pages"],
+      "properties": {
+        "path": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/portablePath"
+            },
+            {
+              "type": "string",
+              "pattern": "\\.[pP][dD][fF]$"
+            }
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mediaType": {
+          "const": "application/pdf"
+        },
+        "pageCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/page"
+          }
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "renderer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "build": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "architecture": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "fontSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy"],
+      "properties": {
+        "policy": {
+          "enum": ["pinned", "document-embedded", "provider-managed"]
+        },
+        "fingerprintSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "policy": {
+                "const": "pinned"
+              }
+            },
+            "required": ["policy"]
+          },
+          "then": {
+            "properties": {
+              "fingerprintSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": ["fingerprintSha256"]
+          }
+        }
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["renderer", "locale", "timezone", "fontSet"],
+      "properties": {
+        "renderer": {
+          "$ref": "#/$defs/renderer"
+        },
+        "platform": {
+          "$ref": "#/$defs/platform"
+        },
+        "locale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fontSet": {
+          "$ref": "#/$defs/fontSet"
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "captureProfileId",
+        "capturedAt",
+        "artifact",
+        "environment"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "captureProfileId": {
+          "$ref": "#/$defs/id"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "references"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/reference"
+          }
+        }
+      }
+    }
+  }
+}

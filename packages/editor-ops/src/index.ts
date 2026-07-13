@@ -9,9 +9,29 @@ import type {
   TableNode,
   ParagraphStyle,
   TextRunNode,
-  TextStyle
+  TextStyle,
 } from "@extend-ai/react-docx-doc-model";
-import { cloneDocModel } from "@extend-ai/react-docx-doc-model";
+import {
+  allocateBlockId,
+  cloneDocModel,
+  cloneParagraphNode,
+  cloneTableNode,
+} from "@extend-ai/react-docx-doc-model";
+
+export {
+  acceptParagraphRevision,
+  createParagraphComment,
+  rejectParagraphRevision,
+  setCommentResolved,
+} from "./annotations";
+export type {
+  AnnotationMutationFailureReason,
+  AnnotationMutationResult,
+  CommentCreationResult,
+  CreateParagraphCommentInput,
+  ParagraphRevisionKind,
+  ParagraphRevisionTarget,
+} from "./annotations";
 
 export interface InsertParagraphOptions {
   paragraphStyle?: ParagraphStyle;
@@ -22,15 +42,22 @@ export interface UpdateTextOptions {
   insertedStyle?: TextStyle;
 }
 
-function paragraphFromText(text: string, options?: InsertParagraphOptions): ParagraphNode {
+function paragraphFromText(
+  text: string,
+  options?: InsertParagraphOptions
+): ParagraphNode {
   return {
     type: "paragraph",
+    blockId: allocateBlockId(),
     style: options?.paragraphStyle,
-    children: [{ type: "text", text, style: options?.runStyle }]
+    children: [{ type: "text", text, style: options?.runStyle }],
   };
 }
 
-function getParagraph(model: DocModel, nodeIndex: number): ParagraphNode | undefined {
+function getParagraph(
+  model: DocModel,
+  nodeIndex: number
+): ParagraphNode | undefined {
   const node = model.nodes[nodeIndex];
   if (!node || node.type !== "paragraph") {
     return undefined;
@@ -38,7 +65,10 @@ function getParagraph(model: DocModel, nodeIndex: number): ParagraphNode | undef
   return node;
 }
 
-function ensureTextRun(paragraph: ParagraphNode, runIndex: number): TextRunNode {
+function ensureTextRun(
+  paragraph: ParagraphNode,
+  runIndex: number
+): TextRunNode {
   let textRunCount = -1;
 
   for (const child of paragraph.children) {
@@ -55,7 +85,7 @@ function ensureTextRun(paragraph: ParagraphNode, runIndex: number): TextRunNode 
   const created: TextRunNode = {
     type: "text",
     text: "",
-    style: {}
+    style: {},
   };
 
   paragraph.children.push(created);
@@ -63,7 +93,9 @@ function ensureTextRun(paragraph: ParagraphNode, runIndex: number): TextRunNode 
 }
 
 function textRuns(paragraph: ParagraphNode): TextRunNode[] {
-  return paragraph.children.filter((child): child is TextRunNode => child.type === "text");
+  return paragraph.children.filter(
+    (child): child is TextRunNode => child.type === "text"
+  );
 }
 
 function cloneTextRun(run: TextRunNode): TextRunNode {
@@ -72,11 +104,14 @@ function cloneTextRun(run: TextRunNode): TextRunNode {
     text: run.text,
     style: run.style ? { ...run.style } : undefined,
     link: run.link,
-    noteReference: run.noteReference ? { ...run.noteReference } : undefined
+    noteReference: run.noteReference ? { ...run.noteReference } : undefined,
   };
 }
 
-function noteReferencesEqual(left?: TextRunNode["noteReference"], right?: TextRunNode["noteReference"]): boolean {
+function noteReferencesEqual(
+  left?: TextRunNode["noteReference"],
+  right?: TextRunNode["noteReference"]
+): boolean {
   if (!left || !right) {
     return left === right;
   }
@@ -96,7 +131,7 @@ function cloneFormFieldRun(run: FormFieldRunNode): FormFieldRunNode {
     value: run.value,
     options: run.options?.map((option) => ({
       displayText: option.displayText,
-      value: option.value
+      value: option.value,
     })),
     widget: run.widget
       ? {
@@ -108,28 +143,28 @@ function cloneFormFieldRun(run: FormFieldRunNode): FormFieldRunNode {
                 inputType: run.widget.text.inputType,
                 defaultText: run.widget.text.defaultText,
                 maxLength: run.widget.text.maxLength,
-                textFormat: run.widget.text.textFormat
+                textFormat: run.widget.text.textFormat,
               }
             : undefined,
           checkbox: run.widget.checkbox
             ? {
                 defaultChecked: run.widget.checkbox.defaultChecked,
                 sizeMode: run.widget.checkbox.sizeMode,
-                sizePt: run.widget.checkbox.sizePt
+                sizePt: run.widget.checkbox.sizePt,
               }
             : undefined,
           dropdown: run.widget.dropdown
             ? {
-                defaultValue: run.widget.dropdown.defaultValue
+                defaultValue: run.widget.dropdown.defaultValue,
               }
-            : undefined
+            : undefined,
         }
       : undefined,
     checkedSymbol: run.checkedSymbol,
     uncheckedSymbol: run.uncheckedSymbol,
     style: run.style ? { ...run.style } : undefined,
     link: run.link,
-    sourceXml: run.sourceXml
+    sourceXml: run.sourceXml,
   };
 }
 
@@ -143,9 +178,13 @@ function cloneImageRun(run: ImageRunNode): ImageRunNode {
     partName: run.partName,
     contentType: run.contentType,
     data: run.data ? new Uint8Array(run.data) : undefined,
+    sourceXml: run.sourceXml,
+    crop: run.crop ? { ...run.crop } : undefined,
+    cssFilter: run.cssFilter,
+    cssOpacity: run.cssOpacity,
     floating: run.floating ? { ...run.floating } : undefined,
     syntheticTextBox: run.syntheticTextBox,
-    textBoxText: run.textBoxText
+    textBoxText: run.textBoxText,
   };
 }
 
@@ -164,7 +203,12 @@ function cloneParagraphChildRun(
 }
 
 function cloneTextStyle(style?: TextStyle): TextStyle | undefined {
-  return style ? { ...style } : undefined;
+  return style
+    ? {
+        ...style,
+        runBorder: style.runBorder ? { ...style.runBorder } : undefined,
+      }
+    : undefined;
 }
 
 function textStylesEqual(left?: TextStyle, right?: TextStyle): boolean {
@@ -208,6 +252,222 @@ function formFieldDisplayValue(field: FormFieldRunNode): string {
   }
 }
 
+function paragraphEditableText(paragraph: ParagraphNode): string {
+  return paragraph.children
+    .map((child) => {
+      if (child.type === "text") {
+        return child.text;
+      }
+      if (child.type === "form-field") {
+        return formFieldDisplayValue(child);
+      }
+      return "";
+    })
+    .join("");
+}
+
+const UNSAFE_SOURCE_TEXT_PATCH_XML =
+  /<(?:w:(?:fldSimple|fldChar|instrText|tab|br|cr|footnoteReference|endnoteReference|drawing|pict|object|sdt|ins|del|conflictIns|conflictDel|moveFrom|moveTo|commentRangeStart|commentRangeEnd|commentReference|bookmarkStart|bookmarkEnd|customXml|smartTag|permStart|permEnd|proofErr|subDoc|altChunk)|mc:AlternateContent)\b/i;
+const FAIL_CLOSED_SOURCE_TEXT_EDIT_XML = /<w:fldSimple\b/i;
+
+function sourceTextPatchForUpdate(
+  source: ParagraphNode,
+  next: ParagraphNode
+): ParagraphNode["sourceTextPatch"] | undefined {
+  const sourceXml = source.sourceXml;
+  if (!sourceXml || UNSAFE_SOURCE_TEXT_PATCH_XML.test(sourceXml)) {
+    return undefined;
+  }
+  if (
+    source.children.length !== next.children.length ||
+    source.children.some((child) => child.type !== "text") ||
+    next.children.some((child) => child.type !== "text")
+  ) {
+    return undefined;
+  }
+
+  const sourceRunCount = sourceXml.match(/<w:r\b/gi)?.length ?? 0;
+  const sourceTextCount = sourceXml.match(/<w:t\b/gi)?.length ?? 0;
+  const pairedSourceTextCount =
+    sourceXml.match(/<w:t\b[^>]*>[\s\S]*?<\/w:t>/gi)?.length ?? 0;
+  if (
+    sourceRunCount !== source.children.length ||
+    sourceTextCount !== source.children.length ||
+    pairedSourceTextCount !== source.children.length
+  ) {
+    return undefined;
+  }
+
+  const sourceRuns = source.children as TextRunNode[];
+  const nextRuns = next.children as TextRunNode[];
+  const provenanceRuns = source.sourceTextPatch?.runs ?? sourceRuns;
+  const hasStableRunMetadata = sourceRuns.every((run, index) => {
+    const nextRun = nextRuns[index];
+    const provenanceRun = provenanceRuns[index];
+    return (
+      Boolean(nextRun) &&
+      Boolean(provenanceRun) &&
+      run.noteReference === undefined &&
+      nextRun.noteReference === undefined &&
+      provenanceRun.noteReference === undefined &&
+      textStylesEqual(run.style, provenanceRun.style) &&
+      textStylesEqual(nextRun.style, provenanceRun.style) &&
+      run.link === provenanceRun.link &&
+      nextRun.link === provenanceRun.link
+    );
+  });
+  if (!hasStableRunMetadata) {
+    return undefined;
+  }
+
+  return {
+    runs: provenanceRuns.map((run) => ({
+      style: cloneTextStyle(run.style),
+      link: run.link,
+      noteReference: run.noteReference ? { ...run.noteReference } : undefined,
+    })),
+  };
+}
+
+function paragraphTextEditIsFailClosed(
+  paragraph: ParagraphNode,
+  text: string
+): boolean {
+  return (
+    paragraphEditableText(paragraph) !== text &&
+    Boolean(
+      paragraph.sourceXml &&
+        FAIL_CLOSED_SOURCE_TEXT_EDIT_XML.test(paragraph.sourceXml)
+    )
+  );
+}
+
+function updatedParagraphNodeText(
+  source: ParagraphNode,
+  text: string,
+  options?: UpdateTextOptions
+): ParagraphNode {
+  if (paragraphEditableText(source) === text) {
+    return source;
+  }
+
+  const paragraph = cloneParagraphNode(source);
+  paragraph.children = distributeTextAcrossParagraphChildren(
+    source,
+    text,
+    options
+  );
+  paragraph.sourceTextPatch = sourceTextPatchForUpdate(source, paragraph);
+  if (!paragraph.sourceTextPatch) {
+    paragraph.sourceXml = undefined;
+  }
+  return paragraph;
+}
+
+function exactSubstringOccurrenceCount(value: string, search: string): number {
+  if (!search) {
+    return 0;
+  }
+  let count = 0;
+  let cursor = 0;
+  while (cursor <= value.length - search.length) {
+    const match = value.indexOf(search, cursor);
+    if (match < 0) {
+      break;
+    }
+    count += 1;
+    cursor = match + search.length;
+  }
+  return count;
+}
+
+function retainTableSourceTextPatch(
+  table: TableNode,
+  sourceParagraph: ParagraphNode,
+  paragraph: ParagraphNode
+): boolean {
+  const tableSourceXml = table.sourceXml;
+  const sourceParagraphXml = sourceParagraph.sourceXml;
+  if (
+    !tableSourceXml ||
+    !sourceParagraphXml ||
+    !paragraph.sourceTextPatch ||
+    exactSubstringOccurrenceCount(tableSourceXml, sourceParagraphXml) !== 1
+  ) {
+    return false;
+  }
+
+  const patches = table.sourceTextPatches ?? [];
+  const nextPatch = {
+    sourceParagraphXml,
+    paragraph: cloneParagraphNode(paragraph),
+  };
+  const existingIndex = patches.findIndex(
+    (patch) => patch.sourceParagraphXml === sourceParagraphXml
+  );
+  table.sourceTextPatches =
+    existingIndex < 0
+      ? [...patches, nextPatch]
+      : patches.map((patch, index) =>
+          index === existingIndex ? nextPatch : patch
+        );
+  return true;
+}
+
+function discardTableSourceXml(table: TableNode): void {
+  table.sourceXml = undefined;
+  table.sourceTextPatches = undefined;
+}
+
+function directParagraphNodeIndex(
+  nodes: TableCellContentNode[],
+  paragraphIndex: number
+): number | undefined {
+  const target = Math.max(0, Math.round(paragraphIndex));
+  let cursor = 0;
+  for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+    if (nodes[nodeIndex]?.type !== "paragraph") {
+      continue;
+    }
+    if (cursor === target) {
+      return nodeIndex;
+    }
+    cursor += 1;
+  }
+  return undefined;
+}
+
+function recursiveParagraphAtIndex(
+  nodes: TableCellContentNode[],
+  paragraphIndex: number
+): ParagraphNode | undefined {
+  const target = Math.max(0, Math.round(paragraphIndex));
+  let cursor = 0;
+  const visit = (
+    candidates: TableCellContentNode[]
+  ): ParagraphNode | undefined => {
+    for (const candidate of candidates) {
+      if (candidate.type === "paragraph") {
+        if (cursor === target) {
+          return candidate;
+        }
+        cursor += 1;
+        continue;
+      }
+      for (const row of candidate.rows) {
+        for (const cell of row.cells) {
+          const paragraph = visit(cell.nodes);
+          if (paragraph) {
+            return paragraph;
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+  return visit(nodes);
+}
+
 function splitRunsAtOffset(
   runs: TextRunNode[],
   offset: number
@@ -245,7 +505,7 @@ function splitRunsAtOffset(
         text: before,
         style: cloneTextStyle(run.style),
         link: run.link,
-        noteReference: run.noteReference ? { ...run.noteReference } : undefined
+        noteReference: run.noteReference ? { ...run.noteReference } : undefined,
       });
     }
     if (after.length > 0) {
@@ -254,7 +514,7 @@ function splitRunsAtOffset(
         text: after,
         style: cloneTextStyle(run.style),
         link: run.link,
-        noteReference: run.noteReference ? { ...run.noteReference } : undefined
+        noteReference: run.noteReference ? { ...run.noteReference } : undefined,
       });
     }
   }
@@ -271,7 +531,11 @@ function commonPrefixLength(left: string, right: string): number {
   return index;
 }
 
-function commonSuffixLength(left: string, right: string, prefixLength: number): number {
+function commonSuffixLength(
+  left: string,
+  right: string,
+  prefixLength: number
+): number {
   const leftRemaining = left.length - prefixLength;
   const rightRemaining = right.length - prefixLength;
   const limit = Math.min(leftRemaining, rightRemaining);
@@ -298,8 +562,8 @@ function distributeTextAcrossRuns(
       {
         type: "text",
         text: normalizedText,
-        style: cloneTextStyle(options?.insertedStyle)
-      }
+        style: cloneTextStyle(options?.insertedStyle),
+      },
     ];
   }
 
@@ -310,13 +574,23 @@ function distributeTextAcrossRuns(
   }
 
   const prefixLength = commonPrefixLength(originalText, normalizedText);
-  const suffixLength = commonSuffixLength(originalText, normalizedText, prefixLength);
+  const suffixLength = commonSuffixLength(
+    originalText,
+    normalizedText,
+    prefixLength
+  );
   const removeStart = prefixLength;
   const removeEnd = Math.max(removeStart, originalText.length - suffixLength);
-  const insertedText = normalizedText.slice(prefixLength, normalizedText.length - suffixLength);
+  const insertedText = normalizedText.slice(
+    prefixLength,
+    normalizedText.length - suffixLength
+  );
 
   const splitBefore = splitRunsAtOffset(originalRuns, removeStart);
-  const splitAfter = splitRunsAtOffset(splitBefore.right, removeEnd - removeStart);
+  const splitAfter = splitRunsAtOffset(
+    splitBefore.right,
+    removeEnd - removeStart
+  );
   const leftRuns = splitBefore.left;
   const rightRuns = splitAfter.right;
 
@@ -332,12 +606,18 @@ function distributeTextAcrossRuns(
     insertedRuns.push({
       type: "text",
       text: insertedText,
-      style: cloneTextStyle(options?.insertedStyle ?? previousRun?.style ?? nextRun?.style),
-      link: inferredLink
+      style: cloneTextStyle(
+        options?.insertedStyle ?? previousRun?.style ?? nextRun?.style
+      ),
+      link: inferredLink,
     });
   }
 
-  const merged = mergeAdjacentRuns([...leftRuns, ...insertedRuns, ...rightRuns]);
+  const merged = mergeAdjacentRuns([
+    ...leftRuns,
+    ...insertedRuns,
+    ...rightRuns,
+  ]);
   if (merged.length > 0) {
     return merged;
   }
@@ -347,8 +627,8 @@ function distributeTextAcrossRuns(
       type: "text",
       text: "",
       style: cloneTextStyle(options?.insertedStyle ?? templateRuns[0]?.style),
-      link: templateRuns[0]?.link
-    }
+      link: templateRuns[0]?.link,
+    },
   ];
 }
 
@@ -357,13 +637,17 @@ function distributeTextAcrossParagraphChildren(
   text: string,
   options?: UpdateTextOptions
 ): ParagraphNode["children"] {
-  const hasNonTextRuns = paragraph.children.some((child) => child.type !== "text");
+  const hasNonTextRuns = paragraph.children.some(
+    (child) => child.type !== "text"
+  );
   if (!hasNonTextRuns) {
     return distributeTextAcrossRuns(text, textRuns(paragraph), options);
   }
 
   const textGroups: TextRunNode[][] = [];
-  const anchors: Array<Exclude<ParagraphNode["children"][number], TextRunNode>> = [];
+  const anchors: Array<
+    Exclude<ParagraphNode["children"][number], TextRunNode>
+  > = [];
   let currentGroup: TextRunNode[] = [];
 
   for (const child of paragraph.children) {
@@ -382,9 +666,12 @@ function distributeTextAcrossParagraphChildren(
   }
   textGroups.push(currentGroup);
 
-  const allAnchorsAreImages = anchors.length > 0 && anchors.every((anchor) => anchor.type === "image");
+  const allAnchorsAreImages =
+    anchors.length > 0 && anchors.every((anchor) => anchor.type === "image");
   if (allAnchorsAreImages) {
-    const originalSegmentTexts = textGroups.map((group) => group.map((run) => run.text).join(""));
+    const originalSegmentTexts = textGroups.map((group) =>
+      group.map((run) => run.text).join("")
+    );
     const originalText = originalSegmentTexts.join("");
     const originalAnchorOffsets: number[] = [];
     let originalOffsetCursor = 0;
@@ -408,15 +695,22 @@ function distributeTextAcrossParagraphChildren(
       let index = 0;
       while (
         index < limit &&
-        originalText[originalText.length - 1 - index] === text[text.length - 1 - index]
+        originalText[originalText.length - 1 - index] ===
+          text[text.length - 1 - index]
       ) {
         index += 1;
       }
       return index;
     })();
     const replacedOriginalStart = prefixLength;
-    const replacedOriginalEnd = Math.max(replacedOriginalStart, originalText.length - suffixLength);
-    const replacedNextEnd = Math.max(replacedOriginalStart, text.length - suffixLength);
+    const replacedOriginalEnd = Math.max(
+      replacedOriginalStart,
+      originalText.length - suffixLength
+    );
+    const replacedNextEnd = Math.max(
+      replacedOriginalStart,
+      text.length - suffixLength
+    );
     const delta = replacedNextEnd - replacedOriginalEnd;
     const remappedAnchorOffsets = originalAnchorOffsets.map((anchorOffset) => {
       if (anchorOffset < replacedOriginalStart) {
@@ -431,7 +725,10 @@ function distributeTextAcrossParagraphChildren(
     const segments: string[] = [];
     let cursor = 0;
     remappedAnchorOffsets.forEach((anchorOffset) => {
-      const safeAnchorOffset = Math.max(cursor, Math.min(anchorOffset, text.length));
+      const safeAnchorOffset = Math.max(
+        cursor,
+        Math.min(anchorOffset, text.length)
+      );
       segments.push(text.slice(cursor, safeAnchorOffset));
       cursor = safeAnchorOffset;
     });
@@ -443,12 +740,14 @@ function distributeTextAcrossParagraphChildren(
       const segmentText = segments[index] ?? "";
 
       if (templateRuns.length > 0) {
-        nextChildren.push(...distributeTextAcrossRuns(segmentText, templateRuns, options));
+        nextChildren.push(
+          ...distributeTextAcrossRuns(segmentText, templateRuns, options)
+        );
       } else if (segmentText.length > 0) {
         nextChildren.push({
           type: "text",
           text: segmentText,
-          style: cloneTextStyle(options?.insertedStyle)
+          style: cloneTextStyle(options?.insertedStyle),
         });
       }
 
@@ -466,7 +765,8 @@ function distributeTextAcrossParagraphChildren(
   let cursor = 0;
   for (let index = 0; index < anchors.length; index += 1) {
     const anchor = anchors[index];
-    const anchorText = anchor.type === "form-field" ? formFieldDisplayValue(anchor) : "";
+    const anchorText =
+      anchor.type === "form-field" ? formFieldDisplayValue(anchor) : "";
     if (!anchorText) {
       return distributeTextAcrossRuns(text, textRuns(paragraph), options);
     }
@@ -493,12 +793,14 @@ function distributeTextAcrossParagraphChildren(
     const segmentText = segments[index] ?? "";
 
     if (templateRuns.length > 0) {
-      nextChildren.push(...distributeTextAcrossRuns(segmentText, templateRuns, options));
+      nextChildren.push(
+        ...distributeTextAcrossRuns(segmentText, templateRuns, options)
+      );
     } else if (segmentText.length > 0) {
       nextChildren.push({
         type: "text",
         text: segmentText,
-        style: cloneTextStyle(options?.insertedStyle)
+        style: cloneTextStyle(options?.insertedStyle),
       });
     }
 
@@ -515,8 +817,8 @@ function distributeTextAcrossParagraphChildren(
     {
       type: "text",
       text: "",
-      style: cloneTextStyle(options?.insertedStyle)
-    }
+      style: cloneTextStyle(options?.insertedStyle),
+    },
   ];
 }
 
@@ -534,9 +836,17 @@ export function splitParagraphChildrenAtTextOffsets(
   afterChildren: ParagraphNode["children"];
 } {
   const normalizedText = text ?? "";
-  const safeStart = Math.max(0, Math.min(Math.round(startOffset), normalizedText.length));
-  const safeEnd = Math.max(safeStart, Math.min(Math.round(endOffset), normalizedText.length));
-  const hasNonTextRuns = paragraph.children.some((child) => child.type !== "text");
+  const safeStart = Math.max(
+    0,
+    Math.min(Math.round(startOffset), normalizedText.length)
+  );
+  const safeEnd = Math.max(
+    safeStart,
+    Math.min(Math.round(endOffset), normalizedText.length)
+  );
+  const hasNonTextRuns = paragraph.children.some(
+    (child) => child.type !== "text"
+  );
 
   if (!hasNonTextRuns) {
     return {
@@ -549,12 +859,14 @@ export function splitParagraphChildrenAtTextOffsets(
         normalizedText.slice(safeEnd),
         textRuns(paragraph),
         { insertedStyle: options?.afterInsertedStyle }
-      )
+      ),
     };
   }
 
   const textGroups: TextRunNode[][] = [];
-  const anchors: Array<Exclude<ParagraphNode["children"][number], TextRunNode>> = [];
+  const anchors: Array<
+    Exclude<ParagraphNode["children"][number], TextRunNode>
+  > = [];
   let currentGroup: TextRunNode[] = [];
 
   for (const child of paragraph.children) {
@@ -576,9 +888,12 @@ export function splitParagraphChildrenAtTextOffsets(
   let segments: string[] | undefined;
   let anchorOffsets: number[] | undefined;
 
-  const allAnchorsAreImages = anchors.length > 0 && anchors.every((anchor) => anchor.type === "image");
+  const allAnchorsAreImages =
+    anchors.length > 0 && anchors.every((anchor) => anchor.type === "image");
   if (allAnchorsAreImages) {
-    const originalSegmentTexts = textGroups.map((group) => group.map((run) => run.text).join(""));
+    const originalSegmentTexts = textGroups.map((group) =>
+      group.map((run) => run.text).join("")
+    );
     const originalText = originalSegmentTexts.join("");
     const originalAnchorOffsets: number[] = [];
     let originalOffsetCursor = 0;
@@ -588,10 +903,20 @@ export function splitParagraphChildrenAtTextOffsets(
     }
 
     const prefixLength = commonPrefixLength(originalText, normalizedText);
-    const suffixLength = commonSuffixLength(originalText, normalizedText, prefixLength);
+    const suffixLength = commonSuffixLength(
+      originalText,
+      normalizedText,
+      prefixLength
+    );
     const replacedOriginalStart = prefixLength;
-    const replacedOriginalEnd = Math.max(replacedOriginalStart, originalText.length - suffixLength);
-    const replacedNextEnd = Math.max(replacedOriginalStart, normalizedText.length - suffixLength);
+    const replacedOriginalEnd = Math.max(
+      replacedOriginalStart,
+      originalText.length - suffixLength
+    );
+    const replacedNextEnd = Math.max(
+      replacedOriginalStart,
+      normalizedText.length - suffixLength
+    );
     const delta = replacedNextEnd - replacedOriginalEnd;
     const remappedAnchorOffsets = originalAnchorOffsets.map((anchorOffset) => {
       if (anchorOffset < replacedOriginalStart) {
@@ -606,7 +931,10 @@ export function splitParagraphChildrenAtTextOffsets(
     const nextSegments: string[] = [];
     let cursor = 0;
     remappedAnchorOffsets.forEach((anchorOffset) => {
-      const safeAnchorOffset = Math.max(cursor, Math.min(anchorOffset, normalizedText.length));
+      const safeAnchorOffset = Math.max(
+        cursor,
+        Math.min(anchorOffset, normalizedText.length)
+      );
       nextSegments.push(normalizedText.slice(cursor, safeAnchorOffset));
       cursor = safeAnchorOffset;
     });
@@ -620,7 +948,8 @@ export function splitParagraphChildrenAtTextOffsets(
 
     for (let index = 0; index < anchors.length; index += 1) {
       const anchor = anchors[index];
-      const anchorText = anchor.type === "form-field" ? formFieldDisplayValue(anchor) : "";
+      const anchorText =
+        anchor.type === "form-field" ? formFieldDisplayValue(anchor) : "";
       if (!anchorText) {
         segments = undefined;
         anchorOffsets = undefined;
@@ -660,7 +989,7 @@ export function splitParagraphChildrenAtTextOffsets(
         normalizedText.slice(safeEnd),
         textRuns(paragraph),
         { insertedStyle: options?.afterInsertedStyle }
-      )
+      ),
     };
   }
 
@@ -678,24 +1007,29 @@ export function splitParagraphChildrenAtTextOffsets(
     const beforePart =
       safeStart <= segmentStart
         ? ""
-        : segmentText.slice(0, Math.max(0, Math.min(segmentText.length, safeStart - segmentStart)));
+        : segmentText.slice(
+            0,
+            Math.max(0, Math.min(segmentText.length, safeStart - segmentStart))
+          );
     const afterPart =
       safeEnd >= segmentEnd
         ? ""
-        : segmentText.slice(Math.max(0, Math.min(segmentText.length, safeEnd - segmentStart)));
+        : segmentText.slice(
+            Math.max(0, Math.min(segmentText.length, safeEnd - segmentStart))
+          );
 
     if (templateRuns.length > 0) {
       if (beforePart.length > 0) {
         beforeChildren.push(
           ...distributeTextAcrossRuns(beforePart, templateRuns, {
-            insertedStyle: options?.beforeInsertedStyle
+            insertedStyle: options?.beforeInsertedStyle,
           })
         );
       }
       if (afterPart.length > 0) {
         afterChildren.push(
           ...distributeTextAcrossRuns(afterPart, templateRuns, {
-            insertedStyle: options?.afterInsertedStyle
+            insertedStyle: options?.afterInsertedStyle,
           })
         );
       }
@@ -704,14 +1038,14 @@ export function splitParagraphChildrenAtTextOffsets(
         beforeChildren.push({
           type: "text",
           text: beforePart,
-          style: cloneTextStyle(options?.beforeInsertedStyle)
+          style: cloneTextStyle(options?.beforeInsertedStyle),
         });
       }
       if (afterPart.length > 0) {
         afterChildren.push({
           type: "text",
           text: afterPart,
-          style: cloneTextStyle(options?.afterInsertedStyle)
+          style: cloneTextStyle(options?.afterInsertedStyle),
         });
       }
     }
@@ -733,7 +1067,7 @@ export function splitParagraphChildrenAtTextOffsets(
     beforeChildren.push({
       type: "text",
       text: "",
-      style: cloneTextStyle(options?.beforeInsertedStyle)
+      style: cloneTextStyle(options?.beforeInsertedStyle),
     });
   }
 
@@ -741,22 +1075,47 @@ export function splitParagraphChildrenAtTextOffsets(
     afterChildren.push({
       type: "text",
       text: "",
-      style: cloneTextStyle(options?.afterInsertedStyle)
+      style: cloneTextStyle(options?.afterInsertedStyle),
     });
   }
 
   return {
     beforeChildren,
-    afterChildren
+    afterChildren,
   };
 }
 
 function cloneParagraph(paragraph: ParagraphNode): ParagraphNode {
+  // Copies are new blocks: they must not share measurement identity with the
+  // original, so they get a fresh id instead of inheriting one.
   return {
     type: "paragraph",
+    blockId: allocateBlockId(),
     style: paragraph.style ? { ...paragraph.style } : undefined,
     sourceXml: paragraph.sourceXml,
-    children: paragraph.children.map(cloneParagraphChildRun)
+    sourceTextPatch: paragraph.sourceTextPatch
+      ? {
+          runs: paragraph.sourceTextPatch.runs.map((run) => ({
+            style: cloneTextStyle(run.style),
+            link: run.link,
+            noteReference: run.noteReference
+              ? { ...run.noteReference }
+              : undefined,
+          })),
+        }
+      : undefined,
+    sourceRunProvenance: paragraph.sourceRunProvenance
+      ? {
+          runs: paragraph.sourceRunProvenance.runs.map((run) => ({
+            style: cloneTextStyle(run.style),
+            link: run.link,
+            noteReference: run.noteReference
+              ? { ...run.noteReference }
+              : undefined,
+          })),
+        }
+      : undefined,
+    children: paragraph.children.map(cloneParagraphChildRun),
   };
 }
 
@@ -805,16 +1164,24 @@ export function updateParagraphText(
   text: string,
   options?: UpdateTextOptions
 ): DocModel {
-  const next = cloneDocModel(model);
-  const paragraph = getParagraph(next, index);
-  if (!paragraph) {
-    return next;
+  // Hot per-keystroke path: share every untouched node so identity-keyed
+  // caches survive the edit; only the edited paragraph is copied.
+  const source = getParagraph(model, index);
+  if (!source) {
+    return { ...model, nodes: [...model.nodes] };
+  }
+  if (paragraphTextEditIsFailClosed(source, text)) {
+    return model;
+  }
+  if (paragraphEditableText(source) === text) {
+    return { ...model, nodes: [...model.nodes] };
   }
 
-  paragraph.children = distributeTextAcrossParagraphChildren(paragraph, text, options);
-  paragraph.sourceXml = undefined;
+  const paragraph = updatedParagraphNodeText(source, text, options);
 
-  return next;
+  const nextNodes = [...model.nodes];
+  nextNodes[index] = paragraph;
+  return { ...model, nodes: nextNodes };
 }
 
 export function updateTableCellText(
@@ -825,51 +1192,105 @@ export function updateTableCellText(
   text: string,
   options?: UpdateTextOptions
 ): DocModel {
-  const next = cloneDocModel(model);
-  const tableNode = next.nodes[tableIndex];
-  if (!tableNode || tableNode.type !== "table") {
-    return next;
+  const sourceTable = model.nodes[tableIndex];
+  if (!sourceTable || sourceTable.type !== "table") {
+    return { ...model, nodes: [...model.nodes] };
   }
 
-  const row = tableNode.rows[rowIndex];
-  const cell = row?.cells[cellIndex];
-  if (!cell) {
-    return next;
-  }
-
-  const paragraphs = cell.nodes.filter((node): node is ParagraphNode => node.type === "paragraph");
   const incomingParagraphTexts = text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .split("\n");
-
   if (incomingParagraphTexts.length === 0) {
     incomingParagraphTexts.push("");
   }
+  const sourceCell = sourceTable.rows[rowIndex]?.cells[cellIndex];
+  if (!sourceCell) {
+    return { ...model, nodes: [...model.nodes] };
+  }
+  const sourceParagraphs = sourceCell.nodes.filter(
+    (node): node is ParagraphNode => node.type === "paragraph"
+  );
+  if (
+    sourceParagraphs.some((paragraph, paragraphIndex) =>
+      paragraphTextEditIsFailClosed(
+        paragraph,
+        incomingParagraphTexts[paragraphIndex] ?? ""
+      )
+    )
+  ) {
+    return model;
+  }
 
-  if (paragraphs.length === 0) {
-    cell.nodes.push(paragraphFromText(incomingParagraphTexts[0] ?? "", {
-      runStyle: cloneTextStyle(options?.insertedStyle)
-    }));
-    tableNode.sourceXml = undefined;
+  const tableNode = cloneTableNode(sourceTable);
+  const row = tableNode.rows[rowIndex];
+  const cell = row?.cells[cellIndex];
+  if (!cell) {
+    return { ...model, nodes: [...model.nodes] };
+  }
+
+  const nextNodes = [...model.nodes];
+  nextNodes[tableIndex] = tableNode;
+  const next = { ...model, nodes: nextNodes };
+
+  const paragraphEntries = cell.nodes
+    .map((node, nodeIndex) => ({ node, nodeIndex }))
+    .filter(
+      (entry): entry is { node: ParagraphNode; nodeIndex: number } =>
+        entry.node.type === "paragraph"
+    );
+
+  if (paragraphEntries.length === 0) {
+    cell.nodes.push(
+      paragraphFromText(incomingParagraphTexts[0] ?? "", {
+        runStyle: cloneTextStyle(options?.insertedStyle),
+      })
+    );
+    discardTableSourceXml(tableNode);
     return next;
   }
 
-  paragraphs.forEach((paragraph, paragraphIndex) => {
+  let changed = false;
+  let retainedEverySourcePatch = true;
+  paragraphEntries.forEach(({ node: paragraph, nodeIndex }, paragraphIndex) => {
     const paragraphText = incomingParagraphTexts[paragraphIndex] ?? "";
-    paragraph.children = distributeTextAcrossParagraphChildren(paragraph, paragraphText, options);
-    paragraph.sourceXml = undefined;
+    const updatedParagraph = updatedParagraphNodeText(
+      paragraph,
+      paragraphText,
+      options
+    );
+    if (updatedParagraph === paragraph) {
+      return;
+    }
+    changed = true;
+    cell.nodes[nodeIndex] = updatedParagraph;
+    retainedEverySourcePatch =
+      retainTableSourceTextPatch(tableNode, paragraph, updatedParagraph) &&
+      retainedEverySourcePatch;
   });
 
-  if (incomingParagraphTexts.length > paragraphs.length) {
-    for (let paragraphIndex = paragraphs.length; paragraphIndex < incomingParagraphTexts.length; paragraphIndex += 1) {
-      cell.nodes.push(paragraphFromText(incomingParagraphTexts[paragraphIndex] ?? "", {
-        runStyle: cloneTextStyle(options?.insertedStyle)
-      }));
+  if (incomingParagraphTexts.length > paragraphEntries.length) {
+    changed = true;
+    retainedEverySourcePatch = false;
+    for (
+      let paragraphIndex = paragraphEntries.length;
+      paragraphIndex < incomingParagraphTexts.length;
+      paragraphIndex += 1
+    ) {
+      cell.nodes.push(
+        paragraphFromText(incomingParagraphTexts[paragraphIndex] ?? "", {
+          runStyle: cloneTextStyle(options?.insertedStyle),
+        })
+      );
     }
   }
 
-  tableNode.sourceXml = undefined;
+  if (!changed) {
+    return model;
+  }
+  if (!retainedEverySourcePatch) {
+    discardTableSourceXml(tableNode);
+  }
   return next;
 }
 
@@ -882,25 +1303,58 @@ export function updateTableCellParagraphText(
   text: string,
   options?: UpdateTextOptions
 ): DocModel {
-  const next = cloneDocModel(model);
-  const tableNode = next.nodes[tableIndex];
-  if (!tableNode || tableNode.type !== "table") {
-    return next;
+  const sourceTable = model.nodes[tableIndex];
+  if (!sourceTable || sourceTable.type !== "table") {
+    return { ...model, nodes: [...model.nodes] };
   }
 
+  const sourceCell = sourceTable.rows[rowIndex]?.cells[cellIndex];
+  const sourceParagraphNodeIndex = sourceCell
+    ? directParagraphNodeIndex(sourceCell.nodes, paragraphIndex)
+    : undefined;
+  const sourceParagraph =
+    sourceParagraphNodeIndex === undefined
+      ? undefined
+      : sourceCell?.nodes[sourceParagraphNodeIndex];
+  if (!sourceCell || !sourceParagraph || sourceParagraph.type !== "paragraph") {
+    return { ...model, nodes: [...model.nodes] };
+  }
+  if (paragraphTextEditIsFailClosed(sourceParagraph, text)) {
+    return model;
+  }
+  if (paragraphEditableText(sourceParagraph) === text) {
+    return model;
+  }
+
+  const tableNode = cloneTableNode(sourceTable);
   const row = tableNode.rows[rowIndex];
   const cell = row?.cells[cellIndex];
-  const paragraph = cell?.nodes.filter((node): node is ParagraphNode => node.type === "paragraph")[paragraphIndex];
+  const paragraphNodeIndex = cell
+    ? directParagraphNodeIndex(cell.nodes, paragraphIndex)
+    : undefined;
+  const paragraph =
+    paragraphNodeIndex === undefined
+      ? undefined
+      : cell?.nodes[paragraphNodeIndex];
 
-  if (!cell || !paragraph) {
-    return next;
+  if (
+    !cell ||
+    !paragraph ||
+    paragraph.type !== "paragraph" ||
+    paragraphNodeIndex === undefined
+  ) {
+    return { ...model, nodes: [...model.nodes] };
   }
 
-  paragraph.children = distributeTextAcrossParagraphChildren(paragraph, text, options);
-  paragraph.sourceXml = undefined;
-  tableNode.sourceXml = undefined;
+  const updatedParagraph = updatedParagraphNodeText(paragraph, text, options);
+  cell.nodes[paragraphNodeIndex] = updatedParagraph;
+  if (!retainTableSourceTextPatch(tableNode, paragraph, updatedParagraph)) {
+    discardTableSourceXml(tableNode);
+  }
 
-  return next;
+  const nextNodes = [...model.nodes];
+  nextNodes[tableIndex] = tableNode;
+  return { ...model, nodes: nextNodes };
 }
 
 export function updateTableCellParagraphTextRecursive(
@@ -912,6 +1366,24 @@ export function updateTableCellParagraphTextRecursive(
   text: string,
   options?: UpdateTextOptions
 ): DocModel {
+  const sourceTable = model.nodes[tableIndex];
+  if (!sourceTable || sourceTable.type !== "table") {
+    return { ...model, nodes: [...model.nodes] };
+  }
+  const sourceCell = sourceTable.rows[rowIndex]?.cells[cellIndex];
+  const sourceParagraph = sourceCell
+    ? recursiveParagraphAtIndex(sourceCell.nodes, paragraphIndex)
+    : undefined;
+  if (!sourceParagraph) {
+    return { ...model, nodes: [...model.nodes] };
+  }
+  if (paragraphTextEditIsFailClosed(sourceParagraph, text)) {
+    return model;
+  }
+  if (paragraphEditableText(sourceParagraph) === text) {
+    return model;
+  }
+
   const next = cloneDocModel(model);
   const tableNode = next.nodes[tableIndex];
   if (!tableNode || tableNode.type !== "table") {
@@ -931,17 +1403,25 @@ export function updateTableCellParagraphTextRecursive(
     nodes: TableCellContentNode[],
     ancestorTables: TableNode[]
   ): boolean => {
-    for (const node of nodes) {
+    for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+      const node = nodes[nodeIndex];
+      if (!node) {
+        continue;
+      }
       if (node.type === "paragraph") {
         if (paragraphCursor !== targetParagraphIndex) {
           paragraphCursor += 1;
           continue;
         }
 
-        node.children = distributeTextAcrossParagraphChildren(node, text, options);
-        node.sourceXml = undefined;
+        const updatedParagraph = updatedParagraphNodeText(node, text, options);
+        nodes[nodeIndex] = updatedParagraph;
         ancestorTables.forEach((ancestorTable) => {
-          ancestorTable.sourceXml = undefined;
+          if (
+            !retainTableSourceTextPatch(ancestorTable, node, updatedParagraph)
+          ) {
+            discardTableSourceXml(ancestorTable);
+          }
         });
         return true;
       }
@@ -965,7 +1445,10 @@ export function updateTableCellParagraphTextRecursive(
   return next;
 }
 
-function mutateParagraphTextRuns(model: DocModel, transform: (run: TextRunNode) => void): void {
+function mutateParagraphTextRuns(
+  model: DocModel,
+  transform: (run: TextRunNode) => void
+): void {
   for (const node of model.nodes) {
     if (node.type === "paragraph") {
       for (const child of node.children) {
@@ -977,9 +1460,11 @@ function mutateParagraphTextRuns(model: DocModel, transform: (run: TextRunNode) 
       continue;
     }
 
-      for (const row of node.rows) {
+    for (const row of node.rows) {
       for (const cell of row.cells) {
-        for (const paragraph of cell.nodes.filter((child): child is ParagraphNode => child.type === "paragraph")) {
+        for (const paragraph of cell.nodes.filter(
+          (child): child is ParagraphNode => child.type === "paragraph"
+        )) {
           for (const child of paragraph.children) {
             if (child.type === "text") {
               transform(child);
@@ -993,7 +1478,11 @@ function mutateParagraphTextRuns(model: DocModel, transform: (run: TextRunNode) 
   }
 }
 
-export function replaceText(model: DocModel, searchValue: string | RegExp, replacement: string): DocModel {
+export function replaceText(
+  model: DocModel,
+  searchValue: string | RegExp,
+  replacement: string
+): DocModel {
   const next = cloneDocModel(model);
 
   mutateParagraphTextRuns(next, (run) => {
@@ -1016,7 +1505,7 @@ export function setParagraphHeading(
 
   paragraph.style = {
     ...(paragraph.style ?? {}),
-    headingLevel
+    headingLevel,
   };
   paragraph.sourceXml = undefined;
 
@@ -1036,7 +1525,7 @@ export function setParagraphAlignment(
 
   paragraph.style = {
     ...(paragraph.style ?? {}),
-    align
+    align,
   };
   paragraph.sourceXml = undefined;
 
@@ -1058,7 +1547,7 @@ export function applyRunStyle(
   const textRun = ensureTextRun(paragraph, runIndex);
   textRun.style = {
     ...(textRun.style ?? {}),
-    ...style
+    ...style,
   };
   paragraph.sourceXml = undefined;
 
@@ -1081,7 +1570,7 @@ export function toggleRunStyleFlag(
   const current = Boolean(textRun.style?.[key]);
   textRun.style = {
     ...(textRun.style ?? {}),
-    [key]: !current
+    [key]: !current,
   };
   paragraph.sourceXml = undefined;
 
@@ -1106,7 +1595,11 @@ export function setRunColor(
   return applyRunStyle(model, nodeIndex, runIndex, { color });
 }
 
-export function copyParagraphs(model: DocModel, startIndex: number, endIndex = startIndex): ParagraphNode[] {
+export function copyParagraphs(
+  model: DocModel,
+  startIndex: number,
+  endIndex = startIndex
+): ParagraphNode[] {
   const start = Math.max(0, Math.min(startIndex, model.nodes.length - 1));
   const end = Math.max(start, Math.min(endIndex, model.nodes.length - 1));
 
@@ -1121,7 +1614,11 @@ export function copyParagraphs(model: DocModel, startIndex: number, endIndex = s
   return paragraphs;
 }
 
-export function pasteParagraphs(model: DocModel, index: number, paragraphs: ParagraphNode[]): DocModel {
+export function pasteParagraphs(
+  model: DocModel,
+  index: number,
+  paragraphs: ParagraphNode[]
+): DocModel {
   const next = cloneDocModel(model);
   const safeIndex = Math.max(0, Math.min(index, next.nodes.length));
   const copies = paragraphs.map(cloneParagraph);
@@ -1129,7 +1626,9 @@ export function pasteParagraphs(model: DocModel, index: number, paragraphs: Para
   return next;
 }
 
-export function serializeParagraphsForClipboard(paragraphs: ParagraphNode[]): string {
+export function serializeParagraphsForClipboard(
+  paragraphs: ParagraphNode[]
+): string {
   return JSON.stringify(
     paragraphs.map((paragraph) => ({
       type: "paragraph",
@@ -1141,10 +1640,10 @@ export function serializeParagraphsForClipboard(paragraphs: ParagraphNode[]): st
               type: "text" as const,
               text: run.text,
               style: run.style ?? undefined,
-              link: run.link
+              link: run.link,
             }
           : run.type === "form-field"
-            ? cloneFormFieldRun(run)
+          ? cloneFormFieldRun(run)
           : {
               type: "image" as const,
               src: run.src,
@@ -1156,14 +1655,16 @@ export function serializeParagraphsForClipboard(paragraphs: ParagraphNode[]): st
               data: run.data ? Array.from(run.data) : undefined,
               floating: run.floating ? { ...run.floating } : undefined,
               syntheticTextBox: run.syntheticTextBox,
-              textBoxText: run.textBoxText
+              textBoxText: run.textBoxText,
             }
-      )
+      ),
     }))
   );
 }
 
-export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | undefined {
+export function parseParagraphsFromClipboard(
+  input: string
+): ParagraphNode[] | undefined {
   try {
     const parsed = JSON.parse(input) as unknown;
     if (!Array.isArray(parsed)) {
@@ -1192,7 +1693,7 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
             type: "text",
             text: run.text,
             style: run.style ? { ...run.style } : undefined,
-            link: typeof run.link === "string" ? run.link : undefined
+            link: typeof run.link === "string" ? run.link : undefined,
           });
           continue;
         }
@@ -1206,41 +1707,63 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
             heightPx: run.heightPx,
             partName: run.partName,
             contentType: run.contentType,
-            data: Array.isArray(run.data) ? new Uint8Array(run.data) : undefined,
-            floating: run.floating && typeof run.floating === "object" ? { ...run.floating } : undefined,
+            data: Array.isArray(run.data)
+              ? new Uint8Array(run.data)
+              : undefined,
+            floating:
+              run.floating && typeof run.floating === "object"
+                ? { ...run.floating }
+                : undefined,
             syntheticTextBox: Boolean(run.syntheticTextBox),
             textBoxText:
-              typeof run.textBoxText === "string" ? run.textBoxText : undefined
+              typeof run.textBoxText === "string" ? run.textBoxText : undefined,
           });
           continue;
         }
 
         if (run.type === "form-field") {
           const options = Array.isArray(run.options)
-            ? run.options.reduce<NonNullable<FormFieldRunNode["options"]>>((collected, option) => {
-                if (!option || typeof option !== "object") {
-                  return collected;
-                }
+            ? run.options.reduce<NonNullable<FormFieldRunNode["options"]>>(
+                (collected, option) => {
+                  if (!option || typeof option !== "object") {
+                    return collected;
+                  }
 
-                const displayText = typeof option.displayText === "string" ? option.displayText : undefined;
-                if (!displayText) {
-                  return collected;
-                }
+                  const displayText =
+                    typeof option.displayText === "string"
+                      ? option.displayText
+                      : undefined;
+                  if (!displayText) {
+                    return collected;
+                  }
 
-                collected.push({
-                  displayText,
-                  value: typeof option.value === "string" ? option.value : undefined
-                });
-                return collected;
-              }, [])
+                  collected.push({
+                    displayText,
+                    value:
+                      typeof option.value === "string"
+                        ? option.value
+                        : undefined,
+                  });
+                  return collected;
+                },
+                []
+              )
             : undefined;
           const widget =
             run.widget && typeof run.widget === "object"
               ? {
-                  name: typeof run.widget.name === "string" ? run.widget.name : undefined,
-                  enabled: typeof run.widget.enabled === "boolean" ? run.widget.enabled : undefined,
+                  name:
+                    typeof run.widget.name === "string"
+                      ? run.widget.name
+                      : undefined,
+                  enabled:
+                    typeof run.widget.enabled === "boolean"
+                      ? run.widget.enabled
+                      : undefined,
                   calcOnExit:
-                    typeof run.widget.calcOnExit === "boolean" ? run.widget.calcOnExit : undefined,
+                    typeof run.widget.calcOnExit === "boolean"
+                      ? run.widget.calcOnExit
+                      : undefined,
                   text:
                     run.widget.text && typeof run.widget.text === "object"
                       ? {
@@ -1259,14 +1782,16 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
                           textFormat:
                             typeof run.widget.text.textFormat === "string"
                               ? run.widget.text.textFormat
-                              : undefined
+                              : undefined,
                         }
                       : undefined,
                   checkbox:
-                    run.widget.checkbox && typeof run.widget.checkbox === "object"
+                    run.widget.checkbox &&
+                    typeof run.widget.checkbox === "object"
                       ? {
                           defaultChecked:
-                            typeof run.widget.checkbox.defaultChecked === "boolean"
+                            typeof run.widget.checkbox.defaultChecked ===
+                            "boolean"
                               ? run.widget.checkbox.defaultChecked
                               : undefined,
                           sizeMode:
@@ -1277,18 +1802,19 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
                           sizePt:
                             typeof run.widget.checkbox.sizePt === "number"
                               ? run.widget.checkbox.sizePt
-                              : undefined
+                              : undefined,
                         }
                       : undefined,
                   dropdown:
-                    run.widget.dropdown && typeof run.widget.dropdown === "object"
+                    run.widget.dropdown &&
+                    typeof run.widget.dropdown === "object"
                       ? {
                           defaultValue:
                             typeof run.widget.dropdown.defaultValue === "string"
                               ? run.widget.dropdown.defaultValue
-                              : undefined
+                              : undefined,
                         }
-                      : undefined
+                      : undefined,
                 }
               : undefined;
 
@@ -1296,20 +1822,30 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
             type: "form-field",
             fieldType: run.fieldType,
             sourceKind:
-              run.sourceKind === "legacy" || run.sourceKind === "sdt" ? run.sourceKind : undefined,
+              run.sourceKind === "legacy" || run.sourceKind === "sdt"
+                ? run.sourceKind
+                : undefined,
             id: typeof run.id === "number" ? run.id : undefined,
             tag: typeof run.tag === "string" ? run.tag : undefined,
             title: typeof run.title === "string" ? run.title : undefined,
-            placeholder: typeof run.placeholder === "string" ? run.placeholder : undefined,
+            placeholder:
+              typeof run.placeholder === "string" ? run.placeholder : undefined,
             checked: typeof run.checked === "boolean" ? run.checked : undefined,
             value: typeof run.value === "string" ? run.value : undefined,
             options: options && options.length > 0 ? options : undefined,
             widget,
-            checkedSymbol: typeof run.checkedSymbol === "string" ? run.checkedSymbol : undefined,
-            uncheckedSymbol: typeof run.uncheckedSymbol === "string" ? run.uncheckedSymbol : undefined,
+            checkedSymbol:
+              typeof run.checkedSymbol === "string"
+                ? run.checkedSymbol
+                : undefined,
+            uncheckedSymbol:
+              typeof run.uncheckedSymbol === "string"
+                ? run.uncheckedSymbol
+                : undefined,
             style: run.style ? { ...run.style } : undefined,
             link: typeof run.link === "string" ? run.link : undefined,
-            sourceXml: typeof run.sourceXml === "string" ? run.sourceXml : undefined
+            sourceXml:
+              typeof run.sourceXml === "string" ? run.sourceXml : undefined,
           });
         }
       }
@@ -1317,8 +1853,9 @@ export function parseParagraphsFromClipboard(input: string): ParagraphNode[] | u
       normalized.push({
         type: "paragraph",
         style: value.style ? { ...value.style } : undefined,
-        sourceXml: typeof value.sourceXml === "string" ? value.sourceXml : undefined,
-        children: children.length > 0 ? children : [{ type: "text", text: "" }]
+        sourceXml:
+          typeof value.sourceXml === "string" ? value.sourceXml : undefined,
+        children: children.length > 0 ? children : [{ type: "text", text: "" }],
       });
     }
 

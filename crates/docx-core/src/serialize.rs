@@ -4,12 +4,17 @@ use std::collections::HashMap;
 
 use crate::model::*;
 use crate::package::{with_part, OoxmlPackage, OoxmlPart};
+use crate::xml::{decode_xml_entities, extract_balanced_tag_ranges, get_attribute};
 use crate::zip::{create_minimal_docx_package, package_to_bytes};
 
 const REL_TYPE_IMAGE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const REL_TYPE_HYPERLINK: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+const REL_TYPE_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const REL_TYPE_COMMENTS_EXTENDED: &str =
+    "http://schemas.microsoft.com/office/2011/relationships/commentsExtended";
 const RELS_XMLNS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const WORD_MAIN_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const OFFICE_REL_NS: &str =
@@ -19,7 +24,13 @@ const DRAWING_WORD_NS: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 const DRAWING_PICTURE_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 const WORD_2010_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+const WORD_2012_NS: &str = "http://schemas.microsoft.com/office/word/2012/wordml";
 const MARKUP_COMPATIBILITY_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+
+const COMMENTS_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
+const COMMENTS_EXTENDED_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml";
 
 const DEFAULT_SECTION_PROPERTIES_XML: &str = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>"#;
 
@@ -340,11 +351,82 @@ fn run_properties_xml(style: Option<&TextStyle>) -> String {
         }
     }
 
-    if let Some(font_family) = &style.font_family {
+    let has_explicit_font_slots = style.font_family_ascii.is_some()
+        || style.font_family_h_ansi.is_some()
+        || style.font_family_east_asia.is_some()
+        || style.font_family_cs.is_some()
+        || style.font_theme_ascii.is_some()
+        || style.font_theme_h_ansi.is_some()
+        || style.font_theme_east_asia.is_some()
+        || style.font_theme_cs.is_some()
+        || style.font_hint.is_some();
+    let font_family_was_edited = style.source_font_family.is_some()
+        && style.font_family.as_deref() != style.source_font_family.as_deref();
+    let mut font_attrs = Vec::new();
+    if font_family_was_edited {
+        if let Some(font_family) = &style.font_family {
+            let escaped_font = escape_xml(font_family);
+            font_attrs.extend([
+                format!(r#"w:ascii="{escaped_font}""#),
+                format!(r#"w:hAnsi="{escaped_font}""#),
+                format!(r#"w:cs="{escaped_font}""#),
+            ]);
+        }
+    } else if has_explicit_font_slots {
+        for (name, value) in [
+            ("w:ascii", style.font_family_ascii.as_deref()),
+            ("w:hAnsi", style.font_family_h_ansi.as_deref()),
+            ("w:eastAsia", style.font_family_east_asia.as_deref()),
+            ("w:cs", style.font_family_cs.as_deref()),
+            ("w:asciiTheme", style.font_theme_ascii.as_deref()),
+            ("w:hAnsiTheme", style.font_theme_h_ansi.as_deref()),
+            ("w:eastAsiaTheme", style.font_theme_east_asia.as_deref()),
+            ("w:csTheme", style.font_theme_cs.as_deref()),
+            ("w:hint", style.font_hint.as_deref()),
+        ] {
+            if let Some(value) = value {
+                font_attrs.push(format!(r#"{name}="{}""#, escape_xml(value)));
+            }
+        }
+    } else if let Some(font_family) = &style.font_family {
         let escaped_font = escape_xml(font_family);
-        fragments.push(format!(
-            r#"<w:rFonts w:ascii="{escaped_font}" w:hAnsi="{escaped_font}" w:cs="{escaped_font}"/>"#
-        ));
+        font_attrs.extend([
+            format!(r#"w:ascii="{escaped_font}""#),
+            format!(r#"w:hAnsi="{escaped_font}""#),
+            format!(r#"w:cs="{escaped_font}""#),
+        ]);
+    }
+    if !font_attrs.is_empty() {
+        fragments.push(format!("<w:rFonts {}/>", font_attrs.join(" ")));
+    }
+
+    let mut language_attrs = Vec::new();
+    for (name, value) in [
+        ("w:val", style.language.as_deref()),
+        ("w:eastAsia", style.language_east_asia.as_deref()),
+        ("w:bidi", style.language_bidi.as_deref()),
+    ] {
+        if let Some(value) = value {
+            language_attrs.push(format!(r#"{name}="{}""#, escape_xml(value)));
+        }
+    }
+    if !language_attrs.is_empty() {
+        fragments.push(format!("<w:lang {}/>", language_attrs.join(" ")));
+    }
+
+    if let Some(right_to_left) = style.right_to_left {
+        fragments.push(if right_to_left {
+            "<w:rtl/>".to_string()
+        } else {
+            r#"<w:rtl w:val="0"/>"#.to_string()
+        });
+    }
+    if let Some(complex_script) = style.complex_script {
+        fragments.push(if complex_script {
+            "<w:cs/>".to_string()
+        } else {
+            r#"<w:cs w:val="0"/>"#.to_string()
+        });
     }
 
     if let Some(vertical_align) = style.vertical_align {
@@ -485,6 +567,34 @@ fn paragraph_line_rule_str(rule: ParagraphLineRule) -> &'static str {
     }
 }
 
+fn tab_stop_alignment_str(alignment: ParagraphTabStopAlignment) -> &'static str {
+    match alignment {
+        ParagraphTabStopAlignment::Left => "left",
+        ParagraphTabStopAlignment::Center => "center",
+        ParagraphTabStopAlignment::Right => "right",
+        ParagraphTabStopAlignment::Decimal => "decimal",
+        ParagraphTabStopAlignment::Bar => "bar",
+    }
+}
+
+fn tab_stop_leader_str(leader: ParagraphTabStopLeader) -> &'static str {
+    match leader {
+        ParagraphTabStopLeader::LeaderNone => "none",
+        ParagraphTabStopLeader::Dot => "dot",
+        ParagraphTabStopLeader::Hyphen => "hyphen",
+        ParagraphTabStopLeader::Underscore => "underscore",
+        ParagraphTabStopLeader::MiddleDot => "middleDot",
+    }
+}
+
+fn on_off_element_xml(tag_name: &str, value: Option<bool>) -> String {
+    match value {
+        Some(true) => format!("<w:{tag_name}/>"),
+        Some(false) => format!(r#"<w:{tag_name} w:val="0"/>"#),
+        None => String::new(),
+    }
+}
+
 fn paragraph_properties_xml(style: Option<&ParagraphStyle>) -> String {
     let Some(style) = style else {
         return String::new();
@@ -502,62 +612,15 @@ fn paragraph_properties_xml(style: Option<&ParagraphStyle>) -> String {
             escape_xml(&paragraph_style_id)
         ));
     }
-    if let Some(align) = style.align {
-        fragments.push(format!(
-            r#"<w:jc w:val="{}"/>"#,
-            paragraph_alignment_str(align)
-        ));
-    }
-    if let Some(numbering) = &style.numbering {
-        if numbering.num_id > 0 {
-            let ilvl = numbering.ilvl.max(0);
-            let num_id = numbering.num_id;
-            fragments.push(format!(
-                r#"<w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr>"#
-            ));
+
+    for fragment in [
+        on_off_element_xml("keepNext", style.keep_next),
+        on_off_element_xml("keepLines", style.keep_lines),
+        on_off_element_xml("pageBreakBefore", style.page_break_before),
+    ] {
+        if !fragment.is_empty() {
+            fragments.push(fragment);
         }
-    }
-
-    let mut spacing_fragments: Vec<String> = Vec::new();
-    if let Some(before) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.before_twips)) {
-        spacing_fragments.push(format!(r#"w:before="{before}""#));
-    }
-    if let Some(after) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.after_twips)) {
-        spacing_fragments.push(format!(r#"w:after="{after}""#));
-    }
-    if let Some(line) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.line_twips)) {
-        spacing_fragments.push(format!(r#"w:line="{line}""#));
-    }
-    if let Some(line_rule) = style.spacing.as_ref().and_then(|s| s.line_rule) {
-        let line_rule = match line_rule {
-            ParagraphLineRule::AtLeast => "atLeast",
-            other => paragraph_line_rule_str(other),
-        };
-        spacing_fragments.push(format!(r#"w:lineRule="{line_rule}""#));
-    }
-    if !spacing_fragments.is_empty() {
-        fragments.push(format!("<w:spacing {}/>", spacing_fragments.join(" ")));
-    }
-
-    let mut indent_fragments: Vec<String> = Vec::new();
-    if let Some(left) = twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.left_twips)) {
-        indent_fragments.push(format!(r#"w:left="{left}""#));
-    }
-    if let Some(right) = twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.right_twips)) {
-        indent_fragments.push(format!(r#"w:right="{right}""#));
-    }
-    if let Some(first_line) =
-        twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.first_line_twips))
-    {
-        indent_fragments.push(format!(r#"w:firstLine="{first_line}""#));
-    }
-    if let Some(hanging) =
-        twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.hanging_twips))
-    {
-        indent_fragments.push(format!(r#"w:hanging="{hanging}""#));
-    }
-    if !indent_fragments.is_empty() {
-        fragments.push(format!("<w:ind {}/>", indent_fragments.join(" ")));
     }
 
     if let Some(drop_cap) = &style.drop_cap {
@@ -603,9 +666,112 @@ fn paragraph_properties_xml(style: Option<&ParagraphStyle>) -> String {
         fragments.push(format!("<w:framePr {}/>", frame_fragments.join(" ")));
     }
 
+    let widow_control_xml = on_off_element_xml("widowControl", style.widow_control);
+    if !widow_control_xml.is_empty() {
+        fragments.push(widow_control_xml);
+    }
+
+    if let Some(numbering) = &style.numbering {
+        if numbering.num_id > 0 {
+            let ilvl = numbering.ilvl.max(0);
+            let num_id = numbering.num_id;
+            fragments.push(format!(
+                r#"<w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr>"#
+            ));
+        }
+    }
+
     let paragraph_border_xml = paragraph_borders_xml(style.borders.as_ref());
     if !paragraph_border_xml.is_empty() {
         fragments.push(paragraph_border_xml);
+    }
+
+    if let Some(background_color) = &style.background_color {
+        let fill = background_color.replace('#', "").to_ascii_uppercase();
+        if !fill.is_empty() {
+            fragments.push(format!(
+                r#"<w:shd w:val="clear" w:color="auto" w:fill="{}"/>"#,
+                escape_xml(&fill)
+            ));
+        }
+    }
+
+    if let Some(tab_stops) = &style.tab_stops {
+        let tabs = tab_stops
+            .iter()
+            .filter_map(|tab_stop| {
+                let position = tab_stop.position_twips?;
+                let alignment = tab_stop_alignment_str(
+                    tab_stop.alignment.unwrap_or(ParagraphTabStopAlignment::Left),
+                );
+                let leader = tab_stop
+                    .leader
+                    .filter(|leader| *leader != ParagraphTabStopLeader::LeaderNone)
+                    .map(|leader| format!(r#" w:leader="{}""#, tab_stop_leader_str(leader)))
+                    .unwrap_or_default();
+                Some(format!(
+                    r#"<w:tab w:val="{alignment}"{leader} w:pos="{position}"/>"#
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !tabs.is_empty() {
+            fragments.push(format!("<w:tabs>{}</w:tabs>", tabs.join("")));
+        }
+    }
+
+    let mut spacing_fragments: Vec<String> = Vec::new();
+    if let Some(before) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.before_twips)) {
+        spacing_fragments.push(format!(r#"w:before="{before}""#));
+    }
+    if let Some(after) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.after_twips)) {
+        spacing_fragments.push(format!(r#"w:after="{after}""#));
+    }
+    if let Some(line) = twips_to_xml_non_negative(style.spacing.as_ref().and_then(|s| s.line_twips)) {
+        spacing_fragments.push(format!(r#"w:line="{line}""#));
+    }
+    if let Some(line_rule) = style.spacing.as_ref().and_then(|s| s.line_rule) {
+        let line_rule = match line_rule {
+            ParagraphLineRule::AtLeast => "atLeast",
+            other => paragraph_line_rule_str(other),
+        };
+        spacing_fragments.push(format!(r#"w:lineRule="{line_rule}""#));
+    }
+    if !spacing_fragments.is_empty() {
+        fragments.push(format!("<w:spacing {}/>", spacing_fragments.join(" ")));
+    }
+
+    let mut indent_fragments: Vec<String> = Vec::new();
+    if let Some(left) = twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.left_twips)) {
+        indent_fragments.push(format!(r#"w:left="{left}""#));
+    }
+    if let Some(right) = twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.right_twips)) {
+        indent_fragments.push(format!(r#"w:right="{right}""#));
+    }
+    if let Some(first_line) =
+        twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.first_line_twips))
+    {
+        indent_fragments.push(format!(r#"w:firstLine="{first_line}""#));
+    }
+    if let Some(hanging) =
+        twips_to_xml_non_negative(style.indent.as_ref().and_then(|i| i.hanging_twips))
+    {
+        indent_fragments.push(format!(r#"w:hanging="{hanging}""#));
+    }
+    if !indent_fragments.is_empty() {
+        fragments.push(format!("<w:ind {}/>", indent_fragments.join(" ")));
+    }
+
+    let contextual_spacing_xml =
+        on_off_element_xml("contextualSpacing", style.contextual_spacing);
+    if !contextual_spacing_xml.is_empty() {
+        fragments.push(contextual_spacing_xml);
+    }
+
+    if let Some(align) = style.align {
+        fragments.push(format!(
+            r#"<w:jc w:val="{}"/>"#,
+            paragraph_alignment_str(align)
+        ));
     }
 
     if fragments.is_empty() {
@@ -736,10 +902,11 @@ fn parse_relationships_xml(xml: &str) -> Vec<Relationship> {
         let tag = &xml[abs_start..abs_start + end_rel + 1];
         search_from = abs_start + end_rel + 1;
 
-        let id = extract_attribute(tag, "Id");
-        let rel_type = extract_attribute(tag, "Type");
-        let target = extract_attribute(tag, "Target");
-        let target_mode = extract_attribute(tag, "TargetMode");
+        let id = extract_attribute(tag, "Id").map(|value| decode_xml_entities(&value));
+        let rel_type = extract_attribute(tag, "Type").map(|value| decode_xml_entities(&value));
+        let target = extract_attribute(tag, "Target").map(|value| decode_xml_entities(&value));
+        let target_mode =
+            extract_attribute(tag, "TargetMode").map(|value| decode_xml_entities(&value));
 
         if let (Some(id), Some(rel_type), Some(target)) = (id, rel_type, target) {
             relationships.push(Relationship {
@@ -973,6 +1140,60 @@ fn ensure_content_type_default(pkg: &mut OoxmlPackage, extension: &str, content_
         part.content.clone()
     };
 
+    pkg.parts.insert(
+        "[Content_Types].xml".to_string(),
+        OoxmlPart {
+            name: "[Content_Types].xml".to_string(),
+            content: updated,
+        },
+    );
+}
+
+fn ensure_content_type_override(pkg: &mut OoxmlPackage, part_name: &str, content_type: &str) {
+    let Some(part) = pkg.parts.get("[Content_Types].xml").cloned() else {
+        return;
+    };
+    let normalized_part_name = if part_name.starts_with('/') {
+        part_name.to_string()
+    } else {
+        format!("/{part_name}")
+    };
+    for range in extract_balanced_tag_ranges(&part.content, "Override") {
+        let Some(open_end) = opening_tag_end(&part.content, range.start) else {
+            continue;
+        };
+        let open_tag = &part.content[range.start..open_end];
+        if !get_attribute(open_tag, "PartName")
+            .is_some_and(|value| value.eq_ignore_ascii_case(&normalized_part_name))
+        {
+            continue;
+        }
+        if get_attribute(open_tag, "ContentType").as_deref() == Some(content_type) {
+            return;
+        }
+        let updated_open_tag = set_xml_attribute(open_tag, "ContentType", content_type);
+        let mut updated = part.content.clone();
+        updated.replace_range(range.start..open_end, &updated_open_tag);
+        pkg.parts.insert(
+            "[Content_Types].xml".to_string(),
+            OoxmlPart {
+                name: "[Content_Types].xml".to_string(),
+                content: updated,
+            },
+        );
+        return;
+    }
+
+    let entry = format!(
+        r#"<Override PartName="{}" ContentType="{}"/>"#,
+        escape_xml(&normalized_part_name),
+        escape_xml(content_type)
+    );
+    let updated = if let Some(index) = part.content.rfind("</Types>") {
+        format!("{}{}{}", &part.content[..index], entry, &part.content[index..])
+    } else {
+        part.content
+    };
     pkg.parts.insert(
         "[Content_Types].xml".to_string(),
         OoxmlPart {
@@ -1629,13 +1850,225 @@ fn form_field_run_xml(field: &FormFieldRunNode, state: &mut ImageSerializationSt
     wrap_with_hyperlink_xml(&sdt_xml, field.link.as_deref(), state)
 }
 
+fn source_run_text(run_xml: &str) -> Option<String> {
+    let tokens = crate::parse::parse_run_text_tokens(run_xml);
+    if tokens.len() != 1 || tokens[0].note_reference.is_some() {
+        return None;
+    }
+
+    let text_ranges = extract_balanced_tag_ranges(run_xml, "w:t");
+    if text_ranges.len() != 1 {
+        return None;
+    }
+
+    Some(tokens[0].text.clone())
+}
+
+fn ensure_xml_space_preserve(opening_tag: &str) -> String {
+    let lower = opening_tag.to_ascii_lowercase();
+    let needle = "xml:space";
+    let mut search_from = 0usize;
+
+    while let Some(relative_start) = lower[search_from..].find(needle) {
+        let attribute_start = search_from + relative_start;
+        let before_is_boundary = attribute_start == 0
+            || opening_tag.as_bytes()[attribute_start - 1].is_ascii_whitespace();
+        let mut cursor = attribute_start + needle.len();
+        while opening_tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        if before_is_boundary && opening_tag.as_bytes().get(cursor) == Some(&b'=') {
+            cursor += 1;
+            while opening_tag
+                .as_bytes()
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
+            {
+                cursor += 1;
+            }
+            let quote = opening_tag.as_bytes().get(cursor).copied();
+            if quote == Some(b'\'') || quote == Some(b'"') {
+                let quote = quote.unwrap_or(b'"');
+                let value_start = cursor + 1;
+                let value_end = opening_tag.as_bytes()[value_start..]
+                    .iter()
+                    .position(|byte| *byte == quote)
+                    .map(|offset| value_start + offset);
+                if let Some(value_end) = value_end {
+                    let mut updated = opening_tag.to_string();
+                    updated.replace_range(value_start..value_end, "preserve");
+                    return updated;
+                }
+            }
+        }
+        search_from = attribute_start + needle.len();
+    }
+
+    let mut updated = opening_tag.to_string();
+    updated.insert_str(updated.len() - 1, r#" xml:space="preserve""#);
+    updated
+}
+
+fn replace_source_run_text(run_xml: &str, text: &str) -> Option<String> {
+    let text_range = extract_balanced_tag_ranges(run_xml, "w:t")
+        .into_iter()
+        .next()?;
+    let source_text_tag = &run_xml[text_range.start..text_range.end];
+
+    let replacement = if text.contains(['\n', '\t']) || source_text_tag.trim_end().ends_with("/>") {
+        render_text_tokens(text)
+    } else {
+        let opening_end = source_text_tag.find('>')?;
+        let closing_start = source_text_tag.rfind("</w:t")?;
+        if closing_start < opening_end {
+            return None;
+        }
+
+        let mut opening_tag = source_text_tag[..=opening_end].to_string();
+        if should_preserve_whitespace(text) {
+            opening_tag = ensure_xml_space_preserve(&opening_tag);
+        }
+        format!(
+            "{opening_tag}{}{closing_tag}",
+            escape_xml(text),
+            closing_tag = &source_text_tag[closing_start..]
+        )
+    };
+
+    let mut patched = String::with_capacity(run_xml.len() + replacement.len());
+    patched.push_str(&run_xml[..text_range.start]);
+    patched.push_str(&replacement);
+    patched.push_str(&run_xml[text_range.end..]);
+    Some(patched)
+}
+
+/// Preserve the original paragraph and run markup for the common editing path
+/// where plain text changes but the run structure and formatting do not. This
+/// keeps unsupported paragraph/run properties, bookmarks, revision boundaries,
+/// and extension markup intact instead of regenerating the whole paragraph from
+/// the intentionally smaller public model.
+fn source_text_patch_xml_is_safe(source_xml: &str) -> bool {
+    let lower = source_xml.to_ascii_lowercase();
+    [
+        "<w:fldchar",
+        "<w:fldsimple",
+        "<w:instrtext",
+        "<w:tab",
+        "<w:br",
+        "<w:cr",
+        "<w:footnotereference",
+        "<w:endnotereference",
+        "<w:drawing",
+        "<w:pict",
+        "<w:object",
+        "<w:sdt",
+        "<w:ins",
+        "<w:del",
+        "<w:conflictins",
+        "<w:conflictdel",
+        "<w:movefrom",
+        "<w:moveto",
+        "<w:commentrangestart",
+        "<w:commentrangeend",
+        "<w:commentreference",
+        "<w:bookmarkstart",
+        "<w:bookmarkend",
+        "<w:customxml",
+        "<w:smarttag",
+        "<w:permstart",
+        "<w:permend",
+        "<w:prooferr",
+        "<w:subdoc",
+        "<w:altchunk",
+        "<mc:alternatecontent",
+    ]
+    .iter()
+    .all(|marker| !lower.contains(marker))
+}
+
+fn patch_source_paragraph_text(
+    paragraph: &ParagraphNode,
+    source_xml: &str,
+    patch_plan: &ParagraphSourceTextPatch,
+) -> Option<String> {
+    if !source_text_patch_xml_is_safe(source_xml) {
+        return None;
+    }
+    let current_runs = paragraph
+        .children
+        .iter()
+        .map(|child| match child {
+            ParagraphChildNode::Text(run) => Some(run),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let source_ranges = extract_balanced_tag_ranges(source_xml, "w:r");
+    if source_ranges.len() != current_runs.len() || patch_plan.runs.len() != current_runs.len() {
+        return None;
+    }
+    if current_runs
+        .iter()
+        .zip(&patch_plan.runs)
+        .any(|(current, expected)| {
+            current.style != expected.style
+                || current.link != expected.link
+                || current.note_reference != expected.note_reference
+        })
+    {
+        return None;
+    }
+
+    let source_text = source_ranges
+        .iter()
+        .flat_map(|range| crate::parse::parse_run_text_tokens(&source_xml[range.start..range.end]))
+        .map(|token| token.text)
+        .collect::<String>();
+    let current_text = current_runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
+
+    if source_text == current_text {
+        return Some(source_xml.to_string());
+    }
+    let mut replacements = Vec::with_capacity(source_ranges.len());
+    for (range, current_run) in source_ranges.iter().zip(current_runs) {
+        let source_run_xml = &source_xml[range.start..range.end];
+        let original_text = source_run_text(source_run_xml)?;
+        if original_text == current_run.text {
+            continue;
+        }
+        replacements.push((
+            range.start,
+            range.end,
+            replace_source_run_text(source_run_xml, &current_run.text)?,
+        ));
+    }
+
+    let mut patched = source_xml.to_string();
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        patched.replace_range(start..end, &replacement);
+    }
+    Some(patched)
+}
+
 fn paragraph_xml(
     paragraph: &ParagraphNode,
     state: &mut ImageSerializationState<'_>,
     run_id_ref: &mut i64,
 ) -> String {
     if let Some(source_xml) = &paragraph.source_xml {
-        return source_xml.clone();
+        if let Some(patch_plan) = &paragraph.source_text_patch {
+            if let Some(patched) = patch_source_paragraph_text(paragraph, source_xml, patch_plan) {
+                return patched;
+            }
+        } else {
+            return source_xml.clone();
+        }
     }
 
     let runs = paragraph
@@ -1644,10 +2077,31 @@ fn paragraph_xml(
         .filter_map(|child| {
             let xml = match child {
                 ParagraphChildNode::Text(text_run) => {
-                    let run_xml = format!(
-                        "<w:r>{}{}</w:r>",
-                        run_properties_xml(text_run.style.as_ref()),
+                    let has_note_reference = text_run.note_reference.is_some();
+                    let note_reference_xml = text_run
+                        .note_reference
+                        .as_ref()
+                        .map(|reference| match reference.kind {
+                            NoteReferenceKind::Footnote => format!(
+                                r#"<w:footnoteReference w:id="{}"/>"#,
+                                reference.id
+                            ),
+                            NoteReferenceKind::Endnote => format!(
+                                r#"<w:endnoteReference w:id="{}"/>"#,
+                                reference.id
+                            ),
+                        })
+                        .unwrap_or_default();
+                    let text_xml = if has_note_reference && text_run.text.is_empty() {
+                        String::new()
+                    } else {
                         render_text_tokens(&text_run.text)
+                    };
+                    let run_xml = format!(
+                        "<w:r>{}{}{}</w:r>",
+                        run_properties_xml(text_run.style.as_ref()),
+                        note_reference_xml,
+                        text_xml
                     );
                     wrap_with_hyperlink_xml(&run_xml, text_run.link.as_deref(), state)
                 }
@@ -1716,12 +2170,89 @@ fn table_cell_vertical_align_str(align: TableCellVerticalAlign) -> &'static str 
     }
 }
 
+fn patch_table_source_text(
+    table: &TableNode,
+    source_xml: &str,
+    state: &mut ImageSerializationState<'_>,
+    run_id_ref: &mut i64,
+) -> Option<String> {
+    let patches = table.source_text_patches.as_deref()?;
+    if patches.is_empty() {
+        return Some(source_xml.to_string());
+    }
+
+    let mut patched = source_xml.to_string();
+    for patch in patches {
+        if patch.source_paragraph_xml.is_empty() {
+            return None;
+        }
+        let mut matches = patched.match_indices(&patch.source_paragraph_xml);
+        let (start, _) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let end = start + patch.source_paragraph_xml.len();
+        let replacement = paragraph_xml(&patch.paragraph, state, run_id_ref);
+        patched.replace_range(start..end, &replacement);
+    }
+    Some(patched)
+}
+
 fn table_xml(table: &TableNode, state: &mut ImageSerializationState<'_>, run_id_ref: &mut i64) -> String {
     if let Some(source_xml) = &table.source_xml {
-        return source_xml.clone();
+        if table.source_text_patches.as_ref().is_some_and(|patches| !patches.is_empty()) {
+            if let Some(patched) = patch_table_source_text(table, source_xml, state, run_id_ref) {
+                return patched;
+            }
+        } else {
+            return source_xml.clone();
+        }
     }
 
     let mut table_props: Vec<String> = Vec::new();
+    // tblpPr precedes tblW in the tblPr child sequence.
+    if let Some(floating) = table.style.as_ref().and_then(|s| s.floating.as_ref()) {
+        let mut attrs = String::new();
+        if let Some(value) = floating.left_from_text_twips {
+            attrs.push_str(&format!(r#" w:leftFromText="{value}""#));
+        }
+        if let Some(value) = floating.right_from_text_twips {
+            attrs.push_str(&format!(r#" w:rightFromText="{value}""#));
+        }
+        if let Some(value) = floating.top_from_text_twips {
+            attrs.push_str(&format!(r#" w:topFromText="{value}""#));
+        }
+        if let Some(value) = floating.bottom_from_text_twips {
+            attrs.push_str(&format!(r#" w:bottomFromText="{value}""#));
+        }
+        if let Some(value) = floating.vertical_anchor.as_ref() {
+            attrs.push_str(&format!(r#" w:vertAnchor="{}""#, escape_xml(value)));
+        }
+        if let Some(value) = floating.horizontal_anchor.as_ref() {
+            attrs.push_str(&format!(r#" w:horzAnchor="{}""#, escape_xml(value)));
+        }
+        if let Some(align) = floating.horizontal_align {
+            attrs.push_str(&format!(
+                r#" w:tblpXSpec="{}""#,
+                image_horizontal_align_str(align)
+            ));
+        }
+        if let Some(value) = floating.x_twips {
+            attrs.push_str(&format!(r#" w:tblpX="{value}""#));
+        }
+        if let Some(align) = floating.vertical_align {
+            attrs.push_str(&format!(
+                r#" w:tblpYSpec="{}""#,
+                image_vertical_align_str(align)
+            ));
+        }
+        if let Some(value) = floating.y_twips {
+            attrs.push_str(&format!(r#" w:tblpY="{value}""#));
+        }
+        if !attrs.is_empty() {
+            table_props.push(format!("<w:tblpPr{attrs}/>"));
+        }
+    }
     if let Some(table_width_twips) = twips_to_xml(table.style.as_ref().and_then(|s| s.width_twips)) {
         table_props.push(format!(
             r#"<w:tblW w:w="{table_width_twips}" w:type="dxa"/>"#
@@ -1818,6 +2349,13 @@ fn table_xml(table: &TableNode, state: &mut ImageSerializationState<'_>, run_id_
             if row.style.as_ref().and_then(|s| s.cant_split) == Some(true) {
                 row_props.push("<w:cantSplit/>".to_string());
             }
+            if let Some(is_header) = row.style.as_ref().and_then(|s| s.is_header) {
+                row_props.push(if is_header {
+                    "<w:tblHeader/>".to_string()
+                } else {
+                    r#"<w:tblHeader w:val="0"/>"#.to_string()
+                });
+            }
 
             let cells = row
                 .cells
@@ -1846,6 +2384,16 @@ fn table_xml(table: &TableNode, state: &mut ImageSerializationState<'_>, run_id_
                         if grid_span > 1 {
                             cell_props.push(format!(r#"<w:gridSpan w:val="{grid_span}"/>"#));
                         }
+                    }
+                    if cell
+                        .style
+                        .as_ref()
+                        .and_then(|s| s.v_merge_continuation)
+                        == Some(true)
+                    {
+                        cell_props.push("<w:vMerge/>".to_string());
+                    } else if cell.style.as_ref().and_then(|s| s.row_span).is_some() {
+                        cell_props.push(r#"<w:vMerge w:val="restart"/>"#.to_string());
                     }
                     let cell_margin_xml = table_box_spacing_xml(
                         cell.style.as_ref().and_then(|s| s.margin_twips.as_ref()),
@@ -2173,6 +2721,486 @@ fn serialize_header_footer_parts(model: &DocModel, pkg: &mut OoxmlPackage) {
     }
 }
 
+fn opening_tag_end(xml: &str, start: usize) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (offset, byte) in xml.as_bytes().iter().copied().enumerate().skip(start) {
+        if let Some(active_quote) = quote {
+            if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            continue;
+        }
+        if byte == b'>' {
+            return Some(offset + 1);
+        }
+    }
+    None
+}
+
+fn attribute_value_range(open_tag: &str, attribute_name: &str) -> Option<(usize, usize)> {
+    let bytes = open_tag.as_bytes();
+    let name = attribute_name.as_bytes();
+    let mut index = 1usize;
+    while index + name.len() <= bytes.len() {
+        let matches_name = bytes[index..index + name.len()]
+            .iter()
+            .zip(name.iter())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right));
+        let before_boundary = index == 0 || bytes[index - 1].is_ascii_whitespace();
+        if !matches_name || !before_boundary {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + name.len();
+        while bytes.get(cursor).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            index += 1;
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            cursor += 1;
+        }
+        let quote = *bytes.get(cursor)?;
+        if quote != b'\'' && quote != b'"' {
+            index += 1;
+            continue;
+        }
+        let value_start = cursor + 1;
+        let value_end = bytes[value_start..]
+            .iter()
+            .position(|byte| *byte == quote)
+            .map(|offset| value_start + offset)?;
+        return Some((value_start, value_end));
+    }
+    None
+}
+
+fn set_xml_attribute(open_tag: &str, name: &str, value: &str) -> String {
+    let escaped = escape_xml(value);
+    if let Some((value_start, value_end)) = attribute_value_range(open_tag, name) {
+        let mut updated = open_tag.to_string();
+        updated.replace_range(value_start..value_end, &escaped);
+        return updated;
+    }
+
+    let mut insert_at = open_tag.len().saturating_sub(1);
+    while insert_at > 0 && open_tag.as_bytes()[insert_at - 1].is_ascii_whitespace() {
+        insert_at -= 1;
+    }
+    if insert_at > 0 && open_tag.as_bytes()[insert_at - 1] == b'/' {
+        insert_at -= 1;
+    }
+    let mut updated = open_tag.to_string();
+    updated.insert_str(insert_at, &format!(r#" {name}="{escaped}""#));
+    updated
+}
+
+fn deterministic_comment_paragraph_id(comment_id: i64) -> String {
+    let normalized = comment_id.max(0) as u64;
+    format!("{:08X}", (0xC000_0000u64 + normalized) & 0xFFFF_FFFF)
+}
+
+fn source_comment_paragraph_id(source_xml: &str) -> Option<String> {
+    let range = extract_balanced_tag_ranges(source_xml, "w:p").into_iter().last()?;
+    let open_end = opening_tag_end(source_xml, range.start)?;
+    get_attribute(&source_xml[range.start..open_end], "w14:paraId")
+}
+
+fn ensure_comment_paragraph_id(source_xml: &str, paragraph_id: &str) -> String {
+    let Some(range) = extract_balanced_tag_ranges(source_xml, "w:p").into_iter().last() else {
+        return source_xml.to_string();
+    };
+    let Some(open_end) = opening_tag_end(source_xml, range.start) else {
+        return source_xml.to_string();
+    };
+    let open_tag = &source_xml[range.start..open_end];
+    let updated_open_tag = set_xml_attribute(open_tag, "w14:paraId", paragraph_id);
+    format!(
+        "{}{}{}",
+        &source_xml[..range.start],
+        updated_open_tag,
+        &source_xml[open_end..]
+    )
+}
+
+fn comment_paragraph_id(comment: &DocumentCommentDefinition) -> String {
+    comment
+        .extended_paragraph_id
+        .clone()
+        .or_else(|| comment.source_xml.as_deref().and_then(source_comment_paragraph_id))
+        .unwrap_or_else(|| deterministic_comment_paragraph_id(comment.id))
+}
+
+fn render_comment_block(
+    comment: &DocumentCommentDefinition,
+    ensure_paragraph_id: bool,
+) -> (String, String) {
+    let paragraph_id = comment_paragraph_id(comment);
+    if let Some(source_xml) = &comment.source_xml {
+        let rendered = if ensure_paragraph_id {
+            ensure_comment_paragraph_id(source_xml, &paragraph_id)
+        } else {
+            source_xml.clone()
+        };
+        return (rendered, paragraph_id);
+    }
+
+    let mut attributes = vec![format!(r#"w:id="{}""#, comment.id)];
+    if let Some(author) = &comment.author {
+        attributes.push(format!(r#"w:author="{}""#, escape_xml(author)));
+    }
+    if let Some(initials) = &comment.initials {
+        attributes.push(format!(r#"w:initials="{}""#, escape_xml(initials)));
+    }
+    if let Some(date) = &comment.date {
+        attributes.push(format!(r#"w:date="{}""#, escape_xml(date)));
+    }
+    let preserve = if should_preserve_whitespace(&comment.text) {
+        r#" xml:space="preserve""#
+    } else {
+        ""
+    };
+    (
+        format!(
+            r#"<w:comment {}><w:p w14:paraId="{}"><w:r><w:t{}>{}</w:t></w:r></w:p></w:comment>"#,
+            attributes.join(" "),
+            escape_xml(&paragraph_id),
+            preserve,
+            escape_xml(&comment.text)
+        ),
+        paragraph_id,
+    )
+}
+
+fn comment_id_from_block(block: &str) -> Option<i64> {
+    let open_end = opening_tag_end(block, 0)?;
+    get_attribute(&block[..open_end], "w:id")?.parse().ok()
+}
+
+fn replace_xml_ranges(
+    source: &str,
+    mut replacements: Vec<(usize, usize, String)>,
+) -> String {
+    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut updated = source.to_string();
+    for (start, end, value) in replacements {
+        updated.replace_range(start..end, &value);
+    }
+    updated
+}
+
+fn ensure_comments_root_namespaces(xml: &str) -> String {
+    let Some(root) = extract_balanced_tag_ranges(xml, "w:comments").into_iter().next() else {
+        return xml.to_string();
+    };
+    let Some(open_end) = opening_tag_end(xml, root.start) else {
+        return xml.to_string();
+    };
+    let mut open_tag = xml[root.start..open_end].to_string();
+    open_tag = ensure_namespace(&open_tag, "w", WORD_MAIN_NS);
+    open_tag = ensure_namespace(&open_tag, "w14", WORD_2010_NS);
+    open_tag = ensure_namespace(&open_tag, "mc", MARKUP_COMPATIBILITY_NS);
+    open_tag = ensure_ignorable_prefix(&open_tag, "w14");
+    format!("{}{}{}", &xml[..root.start], open_tag, &xml[open_end..])
+}
+
+fn merge_comments_xml(
+    existing: Option<&str>,
+    rendered_by_id: &HashMap<i64, String>,
+) -> String {
+    if let Some(existing) = existing {
+        let ranges = extract_balanced_tag_ranges(existing, "w:comment");
+        let mut seen = std::collections::HashSet::new();
+        let replacements = ranges
+            .into_iter()
+            .filter_map(|range| {
+                let block = &existing[range.start..range.end];
+                let id = comment_id_from_block(block)?;
+                let rendered = rendered_by_id.get(&id)?;
+                seen.insert(id);
+                Some((range.start, range.end, rendered.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut merged = replace_xml_ranges(existing, replacements);
+        let mut missing = rendered_by_id
+            .iter()
+            .filter(|(id, _)| !seen.contains(id))
+            .collect::<Vec<_>>();
+        missing.sort_by_key(|(id, _)| **id);
+        if !missing.is_empty() {
+            let appended = missing
+                .into_iter()
+                .map(|(_, block)| block.as_str())
+                .collect::<String>();
+            if let Some(close_start) = merged.rfind("</w:comments>") {
+                merged.insert_str(close_start, &appended);
+            }
+        }
+        return ensure_comments_root_namespaces(&merged);
+    }
+
+    let mut rendered = rendered_by_id.iter().collect::<Vec<_>>();
+    rendered.sort_by_key(|(id, _)| **id);
+    let blocks = rendered
+        .into_iter()
+        .map(|(_, block)| block.as_str())
+        .collect::<String>();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="{WORD_MAIN_NS}" xmlns:w14="{WORD_2010_NS}" xmlns:mc="{MARKUP_COMPATIBILITY_NS}" mc:Ignorable="w14">{blocks}</w:comments>"#
+    )
+}
+
+#[derive(Clone)]
+struct CommentExtendedState {
+    done: Option<bool>,
+    parent_paragraph_id: Option<String>,
+    patch_done: bool,
+    patch_parent: bool,
+}
+
+fn patch_comment_extended_block(
+    block: &str,
+    state: &CommentExtendedState,
+    force: bool,
+) -> String {
+    let Some(open_end) = opening_tag_end(block, 0) else {
+        return block.to_string();
+    };
+    let mut open_tag = block[..open_end].to_string();
+    if (force || state.patch_done) && state.done.is_some() {
+        let done = state.done.unwrap_or(false);
+        open_tag = set_xml_attribute(&open_tag, "w15:done", if done { "1" } else { "0" });
+    }
+    if (force || state.patch_parent) && state.parent_paragraph_id.is_some() {
+        let parent_id = state.parent_paragraph_id.as_deref().unwrap_or_default();
+        open_tag = set_xml_attribute(&open_tag, "w15:paraIdParent", parent_id);
+    }
+    format!("{}{}", open_tag, &block[open_end..])
+}
+
+fn merge_comments_extended_xml(
+    existing: Option<&str>,
+    desired: &HashMap<String, CommentExtendedState>,
+) -> Option<String> {
+    if desired.is_empty() {
+        return existing.map(str::to_string);
+    }
+    if let Some(existing) = existing {
+        let ranges = extract_balanced_tag_ranges(existing, "w15:commentEx");
+        let mut seen = std::collections::HashSet::new();
+        let replacements = ranges
+            .into_iter()
+            .filter_map(|range| {
+                let block = &existing[range.start..range.end];
+                let open_end = opening_tag_end(block, 0)?;
+                let paragraph_id = get_attribute(&block[..open_end], "w15:paraId")?;
+                let state = desired.get(&paragraph_id)?;
+                seen.insert(paragraph_id);
+                Some((
+                    range.start,
+                    range.end,
+                    patch_comment_extended_block(block, state, false),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut merged = replace_xml_ranges(existing, replacements);
+        let mut missing = desired
+            .iter()
+            .filter(|(paragraph_id, _)| !seen.contains(*paragraph_id))
+            .collect::<Vec<_>>();
+        missing.sort_by_key(|(paragraph_id, _)| *paragraph_id);
+        let appended = missing
+            .into_iter()
+            .map(|(paragraph_id, state)| {
+                let mut tag = format!(
+                    r#"<w15:commentEx w15:paraId="{}"/>"#,
+                    escape_xml(paragraph_id)
+                );
+                tag = patch_comment_extended_block(&tag, state, true);
+                tag
+            })
+            .collect::<String>();
+        if let Some(close_start) = merged.rfind("</w15:commentsEx>") {
+            merged.insert_str(close_start, &appended);
+        }
+        return Some(merged);
+    }
+
+    let mut states = desired.iter().collect::<Vec<_>>();
+    states.sort_by_key(|(paragraph_id, _)| *paragraph_id);
+    let entries = states
+        .into_iter()
+        .map(|(paragraph_id, state)| {
+            let tag = format!(
+                r#"<w15:commentEx w15:paraId="{}"/>"#,
+                escape_xml(paragraph_id)
+            );
+            patch_comment_extended_block(&tag, state, true)
+        })
+        .collect::<String>();
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:commentsEx xmlns:w15="{WORD_2012_NS}">{entries}</w15:commentsEx>"#
+    ))
+}
+
+fn ensure_document_relationship(pkg: &mut OoxmlPackage, relationship_type: &str, target: &str) {
+    let part_name = "word/_rels/document.xml.rels";
+    let existing = pkg
+        .parts
+        .get(part_name)
+        .map(|part| part.content.clone())
+        .unwrap_or_else(|| EMPTY_RELATIONSHIPS_XML.to_string());
+    let relationships = parse_relationships_xml(&existing);
+    if relationships.iter().any(|relationship| {
+        relationship.r#type == relationship_type && relationship.target == target
+    }) {
+        return;
+    }
+    let relationship = format!(
+        r#"<Relationship Id="rId{}" Type="{}" Target="{}"/>"#,
+        next_relationship_index(&relationships),
+        escape_xml(relationship_type),
+        escape_xml(target)
+    );
+    let updated = if let Some(close_start) = existing.rfind("</Relationships>") {
+        format!(
+            "{}{}{}",
+            &existing[..close_start],
+            relationship,
+            &existing[close_start..]
+        )
+    } else if let Some(root_start) = existing.find("<Relationships") {
+        if let Some(root_end) = opening_tag_end(&existing, root_start) {
+            let root_tag = &existing[root_start..root_end];
+            if root_tag.trim_end().ends_with("/>") {
+                let slash = root_tag
+                    .rfind('/')
+                    .unwrap_or(root_tag.len().saturating_sub(1));
+                format!(
+                    "{}{}>{}</Relationships>{}",
+                    &existing[..root_start],
+                    &root_tag[..slash],
+                    relationship,
+                    &existing[root_end..]
+                )
+            } else {
+                existing
+            }
+        } else {
+            existing
+        }
+    } else {
+        existing
+    };
+    pkg.parts.insert(
+        part_name.to_string(),
+        OoxmlPart {
+            name: part_name.to_string(),
+            content: updated,
+        },
+    );
+}
+
+fn serialize_comment_parts(model: &DocModel, pkg: &mut OoxmlPackage) {
+    let Some(comments) = model.metadata.comments.as_ref().filter(|comments| !comments.is_empty()) else {
+        return;
+    };
+
+    let extended_comment_ids = comments
+        .iter()
+        .filter(|comment| {
+            comment.resolved.is_some()
+                || comment.source_resolved.is_some()
+                || comment.resolution_dirty == Some(true)
+                || comment.is_new == Some(true)
+                || comment.parent_id.is_some()
+        })
+        .map(|comment| comment.id)
+        .chain(comments.iter().filter_map(|comment| comment.parent_id))
+        .collect::<std::collections::HashSet<_>>();
+    let paragraph_id_by_comment_id = comments
+        .iter()
+        .map(|comment| (comment.id, comment_paragraph_id(comment)))
+        .collect::<HashMap<_, _>>();
+    let rendered_by_id = comments
+        .iter()
+        .map(|comment| {
+            let (rendered, _) =
+                render_comment_block(comment, extended_comment_ids.contains(&comment.id));
+            (comment.id, rendered)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let comments_xml = merge_comments_xml(
+        pkg.parts.get("word/comments.xml").map(|part| part.content.as_str()),
+        &rendered_by_id,
+    );
+    pkg.parts.insert(
+        "word/comments.xml".to_string(),
+        OoxmlPart {
+            name: "word/comments.xml".to_string(),
+            content: comments_xml,
+        },
+    );
+
+    let desired_extended = comments
+        .iter()
+        .filter(|comment| extended_comment_ids.contains(&comment.id))
+        .filter_map(|comment| {
+            let paragraph_id = paragraph_id_by_comment_id.get(&comment.id)?.clone();
+            let parent_paragraph_id = comment
+                .parent_id
+                .and_then(|parent_id| paragraph_id_by_comment_id.get(&parent_id).cloned());
+            Some((
+                paragraph_id,
+                CommentExtendedState {
+                    done: comment.resolved.or(comment.source_resolved),
+                    parent_paragraph_id,
+                    patch_done: comment.resolution_dirty == Some(true)
+                        || comment.is_new == Some(true),
+                    patch_parent: comment.is_new == Some(true),
+                },
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    if let Some(comments_extended_xml) = merge_comments_extended_xml(
+        pkg.parts
+            .get("word/commentsExtended.xml")
+            .map(|part| part.content.as_str()),
+        &desired_extended,
+    ) {
+        pkg.parts.insert(
+            "word/commentsExtended.xml".to_string(),
+            OoxmlPart {
+                name: "word/commentsExtended.xml".to_string(),
+                content: comments_extended_xml,
+            },
+        );
+    }
+
+    ensure_content_type_override(pkg, "word/comments.xml", COMMENTS_CONTENT_TYPE);
+    ensure_document_relationship(pkg, REL_TYPE_COMMENTS, "comments.xml");
+    if pkg.parts.contains_key("word/commentsExtended.xml") {
+        ensure_content_type_override(
+            pkg,
+            "word/commentsExtended.xml",
+            COMMENTS_EXTENDED_CONTENT_TYPE,
+        );
+        ensure_document_relationship(
+            pkg,
+            REL_TYPE_COMMENTS_EXTENDED,
+            "commentsExtended.xml",
+        );
+    }
+}
+
 fn ensure_document_open_tag(model: &DocModel) -> String {
     let mut open_tag = model.metadata.document_open_tag.clone().unwrap_or_else(|| {
         format!(r#"<w:document xmlns:w="{WORD_MAIN_NS}" xmlns:r="{OFFICE_REL_NS}">"#)
@@ -2252,6 +3280,7 @@ pub fn serialize_doc_model(model: &DocModel, base_package: Option<&OoxmlPackage>
     );
     let mut result = with_document;
     serialize_header_footer_parts(model, &mut result);
+    serialize_comment_parts(model, &mut result);
     result
 }
 

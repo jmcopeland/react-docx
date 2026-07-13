@@ -20,6 +20,7 @@ use super::document::{
 };
 use super::metadata::extract_section_properties_xml;
 use super::relationships::parse_part_relationships;
+use super::util::on_off_value_to_boolean;
 
 struct ReferencedSectionPart {
     part_name: String,
@@ -363,8 +364,8 @@ pub fn parse_document_comments(
             let Some(para_id) = get_attribute(tag, "w15:paraId") else {
                 continue;
             };
-            let done = get_attribute(tag, "w15:done")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+            let done_attribute = get_attribute(tag, "w15:done");
+            let done = on_off_value_to_boolean(done_attribute.as_deref());
             let parent_para_id = get_attribute(tag, "w15:paraIdParent");
             extended_by_para_id.insert(para_id, (done, parent_para_id));
         }
@@ -380,7 +381,7 @@ pub fn parse_document_comments(
         };
 
         let parsed_nodes = parse_document_xml(&comment_xml, &context);
-        let text = note_text_from_nodes(&parsed_nodes);
+        let text = comment_text_from_nodes(&parsed_nodes);
         let author = get_attribute(&comment_tag, "w:author")
             .map(|value| decode_xml_entities(&value))
             .filter(|value| !value.trim().is_empty());
@@ -391,17 +392,21 @@ pub fn parse_document_comments(
 
         // The comment's paragraphs carry w14:paraId attributes; the LAST one
         // identifies the comment in commentsExtended.
-        let para_ids: Vec<String> = re::get_unchecked(r#"(?i)w14:paraId="([^"]+)""#)
-            .captures_iter(&comment_xml)
-            .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        let para_ids: Vec<String> = extract_balanced_tag_blocks(&comment_xml, "w:p")
+            .into_iter()
+            .filter_map(|paragraph_xml| find_opening_tag(&paragraph_xml, "w:p"))
+            .filter_map(|paragraph_tag| get_attribute(&paragraph_tag, "w14:paraId"))
             .collect();
+        let extended_paragraph_id = para_ids.last().cloned();
         let mut resolved = None;
-        if let Some(last_para_id) = para_ids.last() {
+        if let Some(last_para_id) = extended_paragraph_id.as_ref() {
             for para_id in &para_ids {
                 comment_id_by_para_id.insert(para_id.clone(), comment_id);
             }
             if let Some((done, parent_para_id)) = extended_by_para_id.get(last_para_id) {
-                resolved = done.filter(|value| *value);
+                // `done="0"` is meaningful provenance. Do not collapse an
+                // explicitly unresolved thread into a missing value.
+                resolved = *done;
                 if let Some(parent_para_id) = parent_para_id {
                     parent_para_id_by_comment_id.insert(comment_id, parent_para_id.clone());
                 }
@@ -416,6 +421,11 @@ pub fn parse_document_comments(
             text,
             parent_id: None,
             resolved,
+            source_xml: Some(comment_xml),
+            extended_paragraph_id,
+            source_resolved: resolved,
+            resolution_dirty: Some(false),
+            is_new: Some(false),
         });
     }
 
@@ -541,6 +551,29 @@ fn note_text_from_nodes(nodes: &[DocNode]) -> String {
 
     let joined = lines.join("\n").trim().to_string();
     strip_leading_bracketed_index(&joined)
+}
+
+fn comment_text_from_nodes(nodes: &[DocNode]) -> String {
+    let mut lines = Vec::new();
+    for node in nodes {
+        append_comment_text_from_node(node, &mut lines);
+    }
+    lines.join("\n")
+}
+
+fn append_comment_text_from_node(node: &DocNode, lines: &mut Vec<String>) {
+    match node {
+        DocNode::Paragraph(paragraph) => lines.push(paragraph_plain_text(paragraph)),
+        DocNode::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for paragraph in cell_paragraphs_from_content(&cell.nodes) {
+                        lines.push(paragraph_plain_text(&paragraph));
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn append_paragraph_from_node(node: &DocNode, lines: &mut Vec<String>) {

@@ -1,0 +1,5 @@
+# The visual comparator is intentionally pinned so interpolation and array
+# behavior cannot drift between fidelity-gate runs.
+# Requires Python 3.12 or newer.
+numpy==2.5.1
+Pillow==12.3.0

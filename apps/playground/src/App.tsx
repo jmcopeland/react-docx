@@ -1091,6 +1091,8 @@ type PlaygroundDocxTableCellTarget = {
 type PlaygroundDocxTestSummary = {
   fileName: string;
   status: string;
+  semanticModelVersion: 1;
+  semanticModelDigest: string;
   bodyNodeCount: number;
   bodyParagraphNodeCount: number;
   bodyTableNodeCount: number;
@@ -1098,6 +1100,9 @@ type PlaygroundDocxTestSummary = {
   tableCount: number;
   imageCount: number;
   formFieldCount: number;
+  trackedChangeCount: number;
+  commentCount: number;
+  resolvedCommentCount: number;
   sectionCount: number;
   headerSectionCount: number;
   footerSectionCount: number;
@@ -1107,6 +1112,43 @@ type PlaygroundDocxTestSummary = {
   canRedo: boolean;
   firstParagraph?: PlaygroundDocxParagraphTarget;
   firstTableCell?: PlaygroundDocxTableCellTarget;
+};
+
+type PlaygroundDocxTextLocation = DocxTextRange["start"]["location"];
+
+type PlaygroundDocxLocationState = {
+  location: PlaygroundDocxTextLocation;
+  text: string;
+  digest: string;
+  alignment: "left" | "center" | "right" | "justify" | null;
+  listType: "unordered" | "ordered" | null;
+  lineMultiple: number;
+};
+
+type PlaygroundDocxRangeState = {
+  range: DocxTextRange;
+  text: string;
+  digest: string;
+  styles: Array<{
+    bold: boolean | null;
+    italic: boolean | null;
+    underline: boolean | null;
+    strike: boolean | null;
+    color: string | null;
+    highlight: string | null;
+    fontFamily: string | null;
+    fontSizePt: number | null;
+  }>;
+};
+
+type PlaygroundDocxActionState = {
+  selection: DocxEditorController["selection"];
+  activeTextRange: DocxTextRange | null;
+  selectedParagraphLocation: PlaygroundDocxTextLocation;
+  selectedRunStyle: PlaygroundDocxRangeState["styles"][number];
+  semanticModelDigest: string;
+  canUndo: boolean;
+  canRedo: boolean;
 };
 
 type PlaygroundDocxTestHooks = {
@@ -1120,6 +1162,13 @@ type PlaygroundDocxTestHooks = {
   getTableShape: (
     tableIndex: number
   ) => { rowCount: number; columnCounts: number[] } | undefined;
+  getActionState: () => PlaygroundDocxActionState;
+  getLocationState: (
+    location: PlaygroundDocxTextLocation
+  ) => PlaygroundDocxLocationState | undefined;
+  getRangeState: (range: DocxTextRange) => PlaygroundDocxRangeState | undefined;
+  getTrackedChanges: () => DocxEditorController["trackedChanges"];
+  getComments: () => DocxEditorController["comments"];
   selectParagraph: (nodeIndex: number) => void;
   selectTableCell: (
     tableIndex: number,
@@ -1170,6 +1219,24 @@ type PlaygroundDocxTestHooks = {
   ) => void;
   undo: () => void;
   redo: () => void;
+  getTrackedChange: (
+    index: number
+  ) => DocxEditorController["trackedChanges"][number];
+  getComment: (commentId: number) => DocxEditorController["comments"][number];
+  acceptTrackedChange: (index: number) => void;
+  rejectTrackedChange: (index: number) => void;
+  acceptTrackedChangeHandle: (
+    change: DocxEditorController["trackedChanges"][number]
+  ) => void;
+  setCommentResolvedHandle: (
+    comment: DocxEditorController["comments"][number],
+    resolved: boolean
+  ) => void;
+  createComment: (
+    text: string,
+    options?: Parameters<DocxEditorController["createComment"]>[1]
+  ) => number;
+  setCommentResolved: (commentId: number, resolved: boolean) => void;
   exportDocx: () => void;
   insertImageBytes: (
     fileName: string,
@@ -1360,6 +1427,246 @@ function findFirstTableCellTarget(
   return undefined;
 }
 
+const TEST_MODEL_IGNORED_KEYS = new Set([
+  "blockId",
+  "data",
+  "documentLoadNonce",
+  "isNew",
+  "resolutionDirty",
+  "sourceFontFamily",
+  "sourceResolved",
+  "sourceFingerprint",
+  "sourceRunProvenance",
+  "sourceTextPatch",
+  "sourceTextPatches",
+  "sourceParagraphXml",
+  "sourceXml",
+  "src",
+]);
+
+function hashTestValue(value: string, seed: number): string {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function canonicalizeTestModelValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeTestModelValue(entry));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    const byteString = Array.from(value, (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+    return {
+      byteLength: value.byteLength,
+      digest: [
+        hashTestValue(byteString, 0x811c9dc5),
+        hashTestValue(byteString, 0x9e3779b9),
+      ].join(""),
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  return Object.keys(record)
+    .filter(
+      (key) => !TEST_MODEL_IGNORED_KEYS.has(key) && record[key] !== undefined
+    )
+    .sort()
+    .reduce<Record<string, unknown>>((canonical, key) => {
+      canonical[key] = canonicalizeTestModelValue(record[key]);
+      return canonical;
+    }, {});
+}
+
+function semanticTestValueDigest(value: unknown): string {
+  const canonicalBody = JSON.stringify(canonicalizeTestModelValue(value));
+  return [
+    hashTestValue(canonicalBody, 0x811c9dc5),
+    hashTestValue(canonicalBody, 0x9e3779b9),
+    hashTestValue(canonicalBody, 0x85ebca6b),
+    hashTestValue(canonicalBody, 0xc2b2ae35),
+  ].join("");
+}
+
+function semanticTestModelDigest(
+  model: DocModel,
+  trackedChanges: DocxEditorController["trackedChanges"]
+): string {
+  return semanticTestValueDigest({
+    nodes: model.nodes,
+    comments: model.metadata.comments ?? [],
+    trackedChanges,
+  });
+}
+
+function sameTestLocation(
+  left: PlaygroundDocxTextLocation,
+  right: PlaygroundDocxTextLocation
+): boolean {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+  if (left.kind === "paragraph" && right.kind === "paragraph") {
+    return left.nodeIndex === right.nodeIndex;
+  }
+  if (left.kind === "table-cell" && right.kind === "table-cell") {
+    return (
+      left.tableIndex === right.tableIndex &&
+      left.rowIndex === right.rowIndex &&
+      left.cellIndex === right.cellIndex &&
+      left.paragraphIndex === right.paragraphIndex
+    );
+  }
+  return false;
+}
+
+function selectedTestLocation(
+  editor: DocxEditorController
+): PlaygroundDocxTextLocation {
+  if (editor.activeTextRange) {
+    return editor.activeTextRange.start.location;
+  }
+  if (editor.selection.kind === "paragraph") {
+    return editor.selection;
+  }
+  return {
+    ...editor.selection,
+    paragraphIndex: 0,
+  };
+}
+
+function paragraphAtTestLocation(
+  model: DocModel,
+  location: PlaygroundDocxTextLocation
+) {
+  if (location.kind === "paragraph") {
+    const node = model.nodes[location.nodeIndex];
+    return node?.type === "paragraph" ? node : undefined;
+  }
+  const table = model.nodes[location.tableIndex];
+  if (!table || table.type !== "table") {
+    return undefined;
+  }
+  const node =
+    table.rows[location.rowIndex]?.cells[location.cellIndex]?.nodes[
+      location.paragraphIndex
+    ];
+  return node?.type === "paragraph" ? node : undefined;
+}
+
+function buildDocxLocationState(
+  editor: DocxEditorController,
+  location: PlaygroundDocxTextLocation
+): PlaygroundDocxLocationState | undefined {
+  const paragraph = paragraphAtTestLocation(editor.model, location);
+  if (!paragraph) {
+    return undefined;
+  }
+  const isSelected = sameTestLocation(selectedTestLocation(editor), location);
+  const listType = isSelected
+    ? editor.hasUnorderedList
+      ? "unordered"
+      : editor.hasOrderedList
+      ? "ordered"
+      : null
+    : paragraph.style?.numbering?.numId
+    ? "ordered"
+    : null;
+  const lineMultiple = isSelected
+    ? editor.selectedLineSpacing.multiple
+    : paragraph.style?.spacing?.lineTwips
+    ? Number((paragraph.style.spacing.lineTwips / 240).toFixed(3))
+    : 1;
+  return {
+    location,
+    text: paragraphTextFromNode(paragraph),
+    digest: semanticTestValueDigest(paragraph),
+    alignment: paragraph.style?.align ?? null,
+    listType,
+    lineMultiple,
+  };
+}
+
+function testTextStyleSnapshot(value: unknown) {
+  const style =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    bold: typeof style.bold === "boolean" ? style.bold : null,
+    italic: typeof style.italic === "boolean" ? style.italic : null,
+    underline: typeof style.underline === "boolean" ? style.underline : null,
+    strike: typeof style.strike === "boolean" ? style.strike : null,
+    color: typeof style.color === "string" ? style.color : null,
+    highlight: typeof style.highlight === "string" ? style.highlight : null,
+    fontFamily: typeof style.fontFamily === "string" ? style.fontFamily : null,
+    fontSizePt: typeof style.fontSizePt === "number" ? style.fontSizePt : null,
+  };
+}
+
+function buildDocxRangeState(
+  model: DocModel,
+  range: DocxTextRange
+): PlaygroundDocxRangeState | undefined {
+  if (!sameTestLocation(range.start.location, range.end.location)) {
+    return undefined;
+  }
+  const paragraph = paragraphAtTestLocation(model, range.start.location);
+  if (!paragraph) {
+    return undefined;
+  }
+  const start = Math.max(0, Math.round(range.start.offset));
+  const end = Math.max(start, Math.round(range.end.offset));
+  const segments: Array<{
+    text: string;
+    style: ReturnType<typeof testTextStyleSnapshot>;
+  }> = [];
+  let cursor = 0;
+  const collect = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(collect);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.type === "text") {
+      const fullText = typeof record.text === "string" ? record.text : "";
+      const segmentStart = cursor;
+      const segmentEnd = cursor + fullText.length;
+      cursor = segmentEnd;
+      const overlapStart = Math.max(start, segmentStart);
+      const overlapEnd = Math.min(end, segmentEnd);
+      if (overlapStart < overlapEnd) {
+        segments.push({
+          text: fullText.slice(
+            overlapStart - segmentStart,
+            overlapEnd - segmentStart
+          ),
+          style: testTextStyleSnapshot(record.style),
+        });
+      }
+      return;
+    }
+    collect(record.children);
+  };
+  collect(paragraph.children);
+
+  return {
+    range,
+    text: segments.map((segment) => segment.text).join(""),
+    digest: semanticTestValueDigest(segments),
+    styles: segments.map((segment) => segment.style),
+  };
+}
+
 function buildDocxTestSummary(
   editor: DocxEditorController
 ): PlaygroundDocxTestSummary {
@@ -1391,6 +1698,11 @@ function buildDocxTestSummary(
   return {
     fileName: editor.fileName,
     status: editor.status,
+    semanticModelVersion: 1,
+    semanticModelDigest: semanticTestModelDigest(
+      editor.model,
+      editor.trackedChanges
+    ),
     bodyNodeCount: editor.model.nodes.length,
     bodyParagraphNodeCount,
     bodyTableNodeCount,
@@ -1398,6 +1710,11 @@ function buildDocxTestSummary(
     tableCount,
     imageCount,
     formFieldCount,
+    trackedChangeCount: editor.trackedChanges.length,
+    commentCount: editor.comments.length,
+    resolvedCommentCount: editor.comments.filter(
+      (comment) => comment.resolved === true
+    ).length,
     sectionCount: sections.length,
     headerSectionCount: editor.model.metadata.headerSections.length,
     footerSectionCount: editor.model.metadata.footerSections.length,
@@ -1505,11 +1822,7 @@ export function App(): React.JSX.Element {
     updateThumbnailRenderWindow(
       thumbnailVirtualItems.map((virtualItem) => virtualItem.index)
     );
-  }, [
-    thumbnailVirtualItems,
-    thumbnailsSheetOpen,
-    updateThumbnailRenderWindow,
-  ]);
+  }, [thumbnailVirtualItems, thumbnailsSheetOpen, updateThumbnailRenderWindow]);
   React.useEffect(() => {
     if (thumbnailsSheetOpen) {
       thumbnailVirtualizer.measure();
@@ -1761,6 +2074,26 @@ export function App(): React.JSX.Element {
       getTableShape: (tableIndex: number) => {
         return tableShapeFromModel(editor.model, tableIndex);
       },
+      getActionState: () => ({
+        selection: editor.selection,
+        activeTextRange: editor.activeTextRange ?? null,
+        selectedParagraphLocation: selectedTestLocation(editor),
+        selectedRunStyle: testTextStyleSnapshot(editor.selectedRunStyle),
+        semanticModelDigest: semanticTestModelDigest(
+          editor.model,
+          editor.trackedChanges
+        ),
+        canUndo: editor.canUndo,
+        canRedo: editor.canRedo,
+      }),
+      getLocationState: (location: PlaygroundDocxTextLocation) => {
+        return buildDocxLocationState(editor, location);
+      },
+      getRangeState: (range: DocxTextRange) => {
+        return buildDocxRangeState(editor.model, range);
+      },
+      getTrackedChanges: () => editor.trackedChanges,
+      getComments: () => editor.comments,
       selectParagraph: (nodeIndex: number) => {
         editor.selectParagraph(nodeIndex);
       },
@@ -1858,6 +2191,81 @@ export function App(): React.JSX.Element {
       },
       redo: () => {
         editor.redo();
+      },
+      getTrackedChange: (index: number) => {
+        const change = editor.trackedChanges[index];
+        if (!change) {
+          throw new Error(`Tracked change ${index} does not exist`);
+        }
+        return change;
+      },
+      getComment: (commentId: number) => {
+        const comment = editor.comments.find(
+          (candidate) => candidate.commentId === commentId
+        );
+        if (!comment) {
+          throw new Error(`Comment ${commentId} does not exist`);
+        }
+        return comment;
+      },
+      acceptTrackedChange: (index: number) => {
+        const change = editor.trackedChanges[index];
+        if (!change) {
+          throw new Error(`Tracked change ${index} does not exist`);
+        }
+        const result = editor.acceptTrackedChange(change);
+        if (!result.ok) {
+          throw new Error(`Accept tracked change failed: ${result.reason}`);
+        }
+      },
+      rejectTrackedChange: (index: number) => {
+        const change = editor.trackedChanges[index];
+        if (!change) {
+          throw new Error(`Tracked change ${index} does not exist`);
+        }
+        const result = editor.rejectTrackedChange(change);
+        if (!result.ok) {
+          throw new Error(`Reject tracked change failed: ${result.reason}`);
+        }
+      },
+      acceptTrackedChangeHandle: (
+        change: DocxEditorController["trackedChanges"][number]
+      ) => {
+        const result = editor.acceptTrackedChange(change);
+        if (!result.ok) {
+          throw new Error(`Accept tracked change failed: ${result.reason}`);
+        }
+      },
+      createComment: (
+        text: string,
+        options?: Parameters<DocxEditorController["createComment"]>[1]
+      ) => {
+        const result = editor.createComment(text, options);
+        if (!result.ok) {
+          throw new Error(`Create comment failed: ${result.reason}`);
+        }
+        return result.commentId;
+      },
+      setCommentResolved: (commentId: number, resolved: boolean) => {
+        const comment = editor.comments.find(
+          (candidate) => candidate.commentId === commentId
+        );
+        if (!comment) {
+          throw new Error(`Comment ${commentId} does not exist`);
+        }
+        const result = editor.setCommentResolved(comment, resolved);
+        if (!result.ok) {
+          throw new Error(`Set comment resolution failed: ${result.reason}`);
+        }
+      },
+      setCommentResolvedHandle: (
+        comment: DocxEditorController["comments"][number],
+        resolved: boolean
+      ) => {
+        const result = editor.setCommentResolved(comment, resolved);
+        if (!result.ok) {
+          throw new Error(`Set comment resolution failed: ${result.reason}`);
+        }
       },
       exportDocx: () => {
         editor.exportDocx();

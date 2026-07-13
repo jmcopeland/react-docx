@@ -227,8 +227,22 @@ Notes:
 - `useDocxLineSpacing(editor)` for selected line spacing state
 - `useDocxBorders(editor)` for paragraph/table border presets
 - `useDocxFormFields(editor)` for DOCX form-field state and updates
-- `useDocxTrackChanges(editor)` for tracked-change UI state
+- `useDocxTrackChanges(editor)` for tracked-change state plus safe
+  `acceptChange` / `rejectChange` actions
+- `useDocxComments(editor)` for comment state, selected-range comment creation,
+  and resolve/reopen actions
 - `useDocxImageWrapMenu(editor)` for image wrapping controls
+
+Annotation mutations intentionally fail closed. Accept/reject currently
+supports a single top-level, text-only `w:ins` or `w:del`; comment creation
+supports one non-empty plain-text range in a top-level paragraph. Moves,
+formatting revisions, fields, hyperlinks, tables, nested revisions, drawings,
+and cross-paragraph ranges return an `unsupported`, `stale`, or `unsafe-xml`
+result without changing the document. Successful actions participate in the
+editor's normal undo/redo history. Pass the current `DocxTrackedChange` or
+`DocxComment` object back to its action; handles are document- and
+source-scoped, so a handle retained across an import or conflicting edit
+returns `stale` instead of targeting a reused OOXML id.
 
 ## Lower-level APIs
 
@@ -244,11 +258,7 @@ The package also re-exports the lower-level internals used by the viewer:
 This means you can build your own pipeline, for example:
 
 ```ts
-import {
-  buildDocModel,
-  parseDocx,
-  serializeDocx,
-} from "@extend-ai/react-docx";
+import { buildDocModel, parseDocx, serializeDocx } from "@extend-ai/react-docx";
 
 const pkg = await parseDocx(arrayBuffer);
 const model = buildDocModel(pkg);

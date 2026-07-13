@@ -1,14 +1,21 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildDocModelFromBytes } from "@extend-ai/react-docx-doc-model";
 import { layoutDocument } from "@extend-ai/react-docx-layout-engine";
 
 const FIXTURES = join(__dirname, "../../crates/docx-core/tests/fixtures-doc");
+const DOCX_TWINS = ["DOCX_TestPage", "patient_original (3)"];
+const HAS_DOCX_TWINS = DOCX_TWINS.every((base) =>
+  existsSync(join(FIXTURES, `${base}.docx`))
+);
 
 function fixtureBuffer(name: string): ArrayBuffer {
   const bytes = readFileSync(join(FIXTURES, name));
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  );
 }
 
 describe("legacy .doc import through wasm", () => {
@@ -34,14 +41,20 @@ describe("legacy .doc import through wasm", () => {
     expect(pages[0].blocks.length).toBeGreaterThan(0);
   });
 
-  it("produces equivalent page counts for a .doc and its .docx twin", async () => {
-    const twins = ["DOCX_TestPage", "patient_original (3)"];
-    for (const base of twins) {
-      const docResult = await buildDocModelFromBytes(fixtureBuffer(`${base}.doc`));
-      const docxResult = await buildDocModelFromBytes(fixtureBuffer(`${base}.docx`));
-      const docPages = layoutDocument(docResult.model as never, {}).length;
-      const docxPages = layoutDocument(docxResult.model as never, {}).length;
-      expect(Math.abs(docPages - docxPages)).toBeLessThanOrEqual(1);
+  it.skipIf(!HAS_DOCX_TWINS)(
+    "produces equivalent page counts for a .doc and its .docx twin",
+    async () => {
+      for (const base of DOCX_TWINS) {
+        const docResult = await buildDocModelFromBytes(
+          fixtureBuffer(`${base}.doc`)
+        );
+        const docxResult = await buildDocModelFromBytes(
+          fixtureBuffer(`${base}.docx`)
+        );
+        const docPages = layoutDocument(docResult.model as never, {}).length;
+        const docxPages = layoutDocument(docxResult.model as never, {}).length;
+        expect(Math.abs(docPages - docxPages)).toBeLessThanOrEqual(1);
+      }
     }
-  });
+  );
 });

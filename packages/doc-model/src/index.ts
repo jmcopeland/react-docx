@@ -9,7 +9,13 @@ import { normalizeDocModel } from "./normalize";
 import type { DocModel } from "./types";
 
 export * from "./types";
-export { cloneDocModel } from "./clone";
+export {
+  allocateBlockId,
+  collectDuplicateDocModelBlockIds,
+  ensureDocModelBlockIds
+} from "./block-id";
+export { cloneDocModel, cloneParagraphNode, cloneTableNode } from "./clone";
+export { deepFreezeDocModel } from "./freeze";
 export { normalizeDocModel } from "./normalize";
 
 export async function buildDocModel(pkg: OoxmlPackage): Promise<DocModel> {

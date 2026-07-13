@@ -502,6 +502,7 @@ pub fn parse_table(
             None
         },
         source_xml: Some(table_xml.to_string()),
+        source_text_patches: None,
     }
 }
 

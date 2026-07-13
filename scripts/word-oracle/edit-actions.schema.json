@@ -1,0 +1,788 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://extend.ai/schemas/react-docx/edit-actions-v1.schema.json",
+  "title": "react-docx deterministic edit action manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "corpus",
+    "sourceManifestSha256",
+    "scenarios"
+  ],
+  "properties": {
+    "$schema": { "type": "string", "minLength": 1 },
+    "schemaVersion": { "const": 1 },
+    "corpus": { "$ref": "#/$defs/corpus" },
+    "sourceManifestSha256": { "$ref": "#/$defs/sha256" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scenario" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "color": {
+      "type": ["string", "null"],
+      "pattern": "^#[a-f0-9]{6}$"
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "revision": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "paragraphLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "nodeIndex"],
+      "properties": {
+        "kind": { "const": "paragraph" },
+        "nodeIndex": { "$ref": "#/$defs/index" }
+      }
+    },
+    "tableCellLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "tableIndex",
+        "rowIndex",
+        "cellIndex",
+        "paragraphIndex"
+      ],
+      "properties": {
+        "kind": { "const": "table-cell" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "paragraphIndex": { "$ref": "#/$defs/index" }
+      }
+    },
+    "location": {
+      "oneOf": [
+        { "$ref": "#/$defs/paragraphLocation" },
+        { "$ref": "#/$defs/tableCellLocation" }
+      ]
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "offset"],
+      "properties": {
+        "location": { "$ref": "#/$defs/location" },
+        "offset": { "$ref": "#/$defs/offset" }
+      }
+    },
+    "range": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/$defs/boundary" },
+        "end": { "$ref": "#/$defs/boundary" }
+      }
+    },
+    "paragraphSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "nodeIndex"],
+      "properties": {
+        "kind": { "const": "paragraph" },
+        "nodeIndex": { "$ref": "#/$defs/index" }
+      }
+    },
+    "tableCellSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "tableIndex", "rowIndex", "cellIndex"],
+      "properties": {
+        "kind": { "const": "table-cell" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" }
+      }
+    },
+    "selectionEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "selection"],
+      "properties": {
+        "kind": { "const": "selection" },
+        "selection": {
+          "oneOf": [
+            { "$ref": "#/$defs/paragraphSelection" },
+            { "$ref": "#/$defs/tableCellSelection" }
+          ]
+        }
+      }
+    },
+    "activeTextRangeEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "range"],
+      "properties": {
+        "kind": { "const": "active-text-range" },
+        "range": { "$ref": "#/$defs/range" }
+      }
+    },
+    "paragraphTextEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "nodeIndex", "text"],
+      "properties": {
+        "kind": { "const": "paragraph-text" },
+        "nodeIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 }
+      }
+    },
+    "tableCellTextEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "tableIndex", "rowIndex", "cellIndex", "text"],
+      "properties": {
+        "kind": { "const": "table-cell-text" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 }
+      }
+    },
+    "textStyleEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "range", "property", "value"],
+      "properties": {
+        "kind": { "const": "text-style" },
+        "range": { "$ref": "#/$defs/range" },
+        "property": {
+          "enum": [
+            "bold",
+            "italic",
+            "underline",
+            "strike",
+            "color",
+            "highlight",
+            "fontFamily",
+            "fontSizePt"
+          ]
+        },
+        "value": { "type": ["boolean", "string", "number", "null"] }
+      }
+    },
+    "paragraphStyleEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "location", "property", "value"],
+      "properties": {
+        "kind": { "const": "paragraph-style" },
+        "location": { "$ref": "#/$defs/location" },
+        "property": { "enum": ["alignment", "listType", "lineMultiple"] },
+        "value": {
+          "type": ["string", "number", "null"]
+        }
+      }
+    },
+    "tableShapeEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "tableIndex", "rowCount", "columnCounts"],
+      "properties": {
+        "kind": { "const": "table-shape" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowCount": { "$ref": "#/$defs/index" },
+        "columnCounts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/index" },
+          "maxItems": 1000000
+        }
+      }
+    },
+    "historyEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "semanticModelDigest", "canUndo", "canRedo"],
+      "properties": {
+        "kind": { "const": "history" },
+        "semanticModelDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "canUndo": { "type": "boolean" },
+        "canRedo": { "type": "boolean" }
+      }
+    },
+    "trackedChangeEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "changeId",
+        "revisionId",
+        "changeKind",
+        "location",
+        "changeText",
+        "resultText",
+        "remainingCount"
+      ],
+      "properties": {
+        "kind": { "const": "tracked-change" },
+        "changeId": { "type": "string", "minLength": 1 },
+        "revisionId": { "type": "string", "minLength": 1 },
+        "changeKind": {
+          "enum": [
+            "insertion",
+            "deletion",
+            "move-from",
+            "move-to",
+            "format-change",
+            "paragraph-format-change"
+          ]
+        },
+        "location": { "$ref": "#/$defs/location" },
+        "changeText": { "type": "string", "maxLength": 1000000 },
+        "resultText": { "type": "string", "maxLength": 1000000 },
+        "remainingCount": { "$ref": "#/$defs/index" }
+      }
+    },
+    "createdCommentEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "range",
+        "commentId",
+        "id",
+        "location",
+        "text",
+        "anchorText",
+        "author",
+        "initials",
+        "date",
+        "resolved",
+        "commentCount",
+        "resolvedCommentCount"
+      ],
+      "properties": {
+        "kind": { "const": "created-comment" },
+        "range": { "$ref": "#/$defs/range" },
+        "commentId": { "$ref": "#/$defs/index" },
+        "id": { "type": "string", "minLength": 1 },
+        "location": { "$ref": "#/$defs/location" },
+        "text": { "type": "string", "maxLength": 1000000 },
+        "anchorText": { "type": "string", "maxLength": 1000000 },
+        "author": { "type": "string", "minLength": 1 },
+        "initials": { "type": "string", "minLength": 1 },
+        "date": { "type": "string", "minLength": 1 },
+        "resolved": { "const": false },
+        "commentCount": { "$ref": "#/$defs/index" },
+        "resolvedCommentCount": { "$ref": "#/$defs/index" }
+      }
+    },
+    "resolvedCommentEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "commentId",
+        "id",
+        "location",
+        "text",
+        "resolved",
+        "commentCount",
+        "resolvedCommentCount"
+      ],
+      "properties": {
+        "kind": { "const": "resolved-comment" },
+        "commentId": { "$ref": "#/$defs/index" },
+        "id": { "type": "string", "minLength": 1 },
+        "location": { "$ref": "#/$defs/location" },
+        "text": { "type": "string", "maxLength": 1000000 },
+        "resolved": { "type": "boolean" },
+        "commentCount": { "$ref": "#/$defs/index" },
+        "resolvedCommentCount": { "$ref": "#/$defs/index" }
+      }
+    },
+    "actionEffect": {
+      "oneOf": [
+        { "$ref": "#/$defs/selectionEffect" },
+        { "$ref": "#/$defs/activeTextRangeEffect" },
+        { "$ref": "#/$defs/paragraphTextEffect" },
+        { "$ref": "#/$defs/tableCellTextEffect" },
+        { "$ref": "#/$defs/textStyleEffect" },
+        { "$ref": "#/$defs/paragraphStyleEffect" },
+        { "$ref": "#/$defs/tableShapeEffect" },
+        { "$ref": "#/$defs/historyEffect" },
+        { "$ref": "#/$defs/trackedChangeEffect" },
+        { "$ref": "#/$defs/createdCommentEffect" },
+        { "$ref": "#/$defs/resolvedCommentEffect" }
+      ]
+    },
+    "selectionExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "unchanged" },
+        "effect": { "$ref": "#/$defs/selectionEffect" }
+      }
+    },
+    "activeTextRangeExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "unchanged" },
+        "effect": { "$ref": "#/$defs/activeTextRangeEffect" }
+      }
+    },
+    "paragraphTextExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/paragraphTextEffect" }
+      }
+    },
+    "tableCellTextExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/tableCellTextEffect" }
+      }
+    },
+    "textStyleExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/textStyleEffect" }
+      }
+    },
+    "paragraphStyleExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/paragraphStyleEffect" }
+      }
+    },
+    "tableShapeExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/tableShapeEffect" }
+      }
+    },
+    "historyExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/historyEffect" }
+      }
+    },
+    "trackedChangeExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/trackedChangeEffect" }
+      }
+    },
+    "createdCommentExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/createdCommentEffect" }
+      }
+    },
+    "resolvedCommentExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel", "effect"],
+      "properties": {
+        "semanticModel": { "const": "changed" },
+        "effect": { "$ref": "#/$defs/resolvedCommentEffect" }
+      }
+    },
+    "selectParagraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "nodeIndex", "expect"],
+      "properties": {
+        "type": { "const": "select-paragraph" },
+        "nodeIndex": { "$ref": "#/$defs/index" },
+        "expect": { "$ref": "#/$defs/selectionExpectation" }
+      }
+    },
+    "selectTableCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tableIndex", "rowIndex", "cellIndex", "expect"],
+      "properties": {
+        "type": { "const": "select-table-cell" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "expect": { "$ref": "#/$defs/selectionExpectation" }
+      }
+    },
+    "setTextRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "range", "expect"],
+      "properties": {
+        "type": { "const": "set-text-range" },
+        "range": { "$ref": "#/$defs/range" },
+        "expect": { "$ref": "#/$defs/activeTextRangeExpectation" }
+      }
+    },
+    "commitParagraphText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "nodeIndex", "text", "expect"],
+      "properties": {
+        "type": { "const": "commit-paragraph-text" },
+        "nodeIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 },
+        "expect": { "$ref": "#/$defs/paragraphTextExpectation" }
+      }
+    },
+    "commitTableCellText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "tableIndex",
+        "rowIndex",
+        "cellIndex",
+        "text",
+        "expect"
+      ],
+      "properties": {
+        "type": { "const": "commit-table-cell-text" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 },
+        "expect": { "$ref": "#/$defs/tableCellTextExpectation" }
+      }
+    },
+    "textToggleAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "expect"],
+      "properties": {
+        "type": {
+          "enum": [
+            "toggle-bold",
+            "toggle-italic",
+            "toggle-underline",
+            "toggle-strike"
+          ]
+        },
+        "expect": { "$ref": "#/$defs/textStyleExpectation" }
+      }
+    },
+    "historyAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "expect"],
+      "properties": {
+        "type": { "enum": ["undo", "redo"] },
+        "expect": { "$ref": "#/$defs/historyExpectation" }
+      }
+    },
+    "colorAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "color", "expect"],
+      "properties": {
+        "type": { "enum": ["set-text-color", "set-highlight"] },
+        "color": { "$ref": "#/$defs/color" },
+        "expect": { "$ref": "#/$defs/textStyleExpectation" }
+      }
+    },
+    "fontFamilyAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "fontFamily", "expect"],
+      "properties": {
+        "type": { "const": "set-font-family" },
+        "fontFamily": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expect": { "$ref": "#/$defs/textStyleExpectation" }
+      }
+    },
+    "fontSizeAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "fontSizePt", "expect"],
+      "properties": {
+        "type": { "const": "set-font-size" },
+        "fontSizePt": { "type": "number", "minimum": 1, "maximum": 400 },
+        "expect": { "$ref": "#/$defs/textStyleExpectation" }
+      }
+    },
+    "alignmentAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "alignment", "expect"],
+      "properties": {
+        "type": { "const": "set-alignment" },
+        "alignment": {
+          "enum": ["left", "center", "right", "justify", null]
+        },
+        "expect": { "$ref": "#/$defs/paragraphStyleExpectation" }
+      }
+    },
+    "listAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "listType", "expect"],
+      "properties": {
+        "type": { "const": "toggle-list" },
+        "listType": { "enum": ["unordered", "ordered"] },
+        "expect": { "$ref": "#/$defs/paragraphStyleExpectation" }
+      }
+    },
+    "lineSpacingAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lineMultiple", "expect"],
+      "properties": {
+        "type": { "const": "set-line-spacing" },
+        "lineMultiple": { "type": "number", "minimum": 0.1, "maximum": 10 },
+        "expect": { "$ref": "#/$defs/paragraphStyleExpectation" }
+      }
+    },
+    "insertTableRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tableIndex", "rowIndex", "direction", "expect"],
+      "properties": {
+        "type": { "const": "insert-table-row" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "direction": { "enum": ["above", "below"] },
+        "expect": { "$ref": "#/$defs/tableShapeExpectation" }
+      }
+    },
+    "insertTableColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tableIndex", "cellIndex", "direction", "expect"],
+      "properties": {
+        "type": { "const": "insert-table-column" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "direction": { "enum": ["left", "right"] },
+        "expect": { "$ref": "#/$defs/tableShapeExpectation" }
+      }
+    },
+    "deleteTableRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tableIndex", "rowIndex", "expect"],
+      "properties": {
+        "type": { "const": "delete-table-row" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "expect": { "$ref": "#/$defs/tableShapeExpectation" }
+      }
+    },
+    "deleteTableColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tableIndex", "cellIndex", "expect"],
+      "properties": {
+        "type": { "const": "delete-table-column" },
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "expect": { "$ref": "#/$defs/tableShapeExpectation" }
+      }
+    },
+    "trackedChangeAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "index", "expect"],
+      "properties": {
+        "type": {
+          "enum": ["accept-tracked-change", "reject-tracked-change"]
+        },
+        "index": { "$ref": "#/$defs/index" },
+        "expect": { "$ref": "#/$defs/trackedChangeExpectation" }
+      }
+    },
+    "createComment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text", "options", "expect"],
+      "properties": {
+        "type": { "const": "create-comment" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["author", "initials", "date"],
+          "properties": {
+            "author": { "type": "string", "minLength": 1 },
+            "initials": { "type": "string", "minLength": 1 },
+            "date": { "type": "string", "minLength": 1 }
+          }
+        },
+        "expect": { "$ref": "#/$defs/createdCommentExpectation" }
+      }
+    },
+    "setCommentResolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "commentId", "resolved", "expect"],
+      "properties": {
+        "type": { "const": "set-comment-resolved" },
+        "commentId": { "$ref": "#/$defs/index" },
+        "resolved": { "type": "boolean" },
+        "expect": { "$ref": "#/$defs/resolvedCommentExpectation" }
+      }
+    },
+    "action": {
+      "oneOf": [
+        { "$ref": "#/$defs/selectParagraph" },
+        { "$ref": "#/$defs/selectTableCell" },
+        { "$ref": "#/$defs/setTextRange" },
+        { "$ref": "#/$defs/commitParagraphText" },
+        { "$ref": "#/$defs/commitTableCellText" },
+        { "$ref": "#/$defs/textToggleAction" },
+        { "$ref": "#/$defs/historyAction" },
+        { "$ref": "#/$defs/colorAction" },
+        { "$ref": "#/$defs/fontFamilyAction" },
+        { "$ref": "#/$defs/fontSizeAction" },
+        { "$ref": "#/$defs/alignmentAction" },
+        { "$ref": "#/$defs/listAction" },
+        { "$ref": "#/$defs/lineSpacingAction" },
+        { "$ref": "#/$defs/insertTableRow" },
+        { "$ref": "#/$defs/insertTableColumn" },
+        { "$ref": "#/$defs/deleteTableRow" },
+        { "$ref": "#/$defs/deleteTableColumn" },
+        { "$ref": "#/$defs/trackedChangeAction" },
+        { "$ref": "#/$defs/createComment" },
+        { "$ref": "#/$defs/setCommentResolved" }
+      ]
+    },
+    "expectedParagraphText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeIndex", "text"],
+      "properties": {
+        "nodeIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 }
+      }
+    },
+    "expectedTableCellText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tableIndex", "rowIndex", "cellIndex", "text"],
+      "properties": {
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowIndex": { "$ref": "#/$defs/index" },
+        "cellIndex": { "$ref": "#/$defs/index" },
+        "text": { "type": "string", "maxLength": 1000000 }
+      }
+    },
+    "expectedTableShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tableIndex", "rowCount", "columnCounts"],
+      "properties": {
+        "tableIndex": { "$ref": "#/$defs/index" },
+        "rowCount": { "$ref": "#/$defs/index" },
+        "columnCounts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/index" },
+          "maxItems": 1000000
+        }
+      }
+    },
+    "scenarioExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModel"],
+      "properties": {
+        "semanticModel": {
+          "enum": ["changed-from-source", "same-as-source"]
+        },
+        "semanticModelDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "trackedChangeCount": { "$ref": "#/$defs/index" },
+        "commentCount": { "$ref": "#/$defs/index" },
+        "resolvedCommentCount": { "$ref": "#/$defs/index" },
+        "paragraphTexts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expectedParagraphText" }
+        },
+        "tableCellTexts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expectedTableCellText" }
+        },
+        "tableShapes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expectedTableShape" }
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceCaseId", "expected", "actions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "sourceCaseId": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "minLength": 1 },
+        "expected": { "$ref": "#/$defs/scenarioExpectation" },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/action" }
+        }
+      }
+    }
+  }
+}

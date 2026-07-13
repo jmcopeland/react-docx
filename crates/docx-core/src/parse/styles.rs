@@ -999,6 +999,25 @@ pub fn merge_text_styles(
         background_color: None,
         font_size_pt: None,
         font_family: None,
+        source_font_family: None,
+        font_family_ascii: None,
+        font_family_h_ansi: None,
+        font_family_east_asia: None,
+        font_family_cs: None,
+        font_theme_ascii: None,
+        font_theme_h_ansi: None,
+        font_theme_east_asia: None,
+        font_theme_cs: None,
+        resolved_font_family_ascii: None,
+        resolved_font_family_h_ansi: None,
+        resolved_font_family_east_asia: None,
+        resolved_font_family_cs: None,
+        font_hint: None,
+        language: None,
+        language_east_asia: None,
+        language_bidi: None,
+        right_to_left: None,
+        complex_script: None,
         character_spacing_twips: None,
         vertical_align: None,
         run_border: None,
@@ -1032,6 +1051,64 @@ pub fn merge_text_styles(
         if style.font_family.is_some() {
             merged.font_family = style.font_family.clone();
         }
+        if style.source_font_family.is_some() {
+            merged.source_font_family = style.source_font_family.clone();
+        }
+        if style.font_family_ascii.is_some() {
+            merged.font_family_ascii = style.font_family_ascii.clone();
+        }
+        if style.font_family_h_ansi.is_some() {
+            merged.font_family_h_ansi = style.font_family_h_ansi.clone();
+        }
+        if style.font_family_east_asia.is_some() {
+            merged.font_family_east_asia = style.font_family_east_asia.clone();
+        }
+        if style.font_family_cs.is_some() {
+            merged.font_family_cs = style.font_family_cs.clone();
+        }
+        if style.font_theme_ascii.is_some() {
+            merged.font_theme_ascii = style.font_theme_ascii.clone();
+        }
+        if style.font_theme_h_ansi.is_some() {
+            merged.font_theme_h_ansi = style.font_theme_h_ansi.clone();
+        }
+        if style.font_theme_east_asia.is_some() {
+            merged.font_theme_east_asia = style.font_theme_east_asia.clone();
+        }
+        if style.font_theme_cs.is_some() {
+            merged.font_theme_cs = style.font_theme_cs.clone();
+        }
+        if style.resolved_font_family_ascii.is_some() {
+            merged.resolved_font_family_ascii = style.resolved_font_family_ascii.clone();
+        }
+        if style.resolved_font_family_h_ansi.is_some() {
+            merged.resolved_font_family_h_ansi = style.resolved_font_family_h_ansi.clone();
+        }
+        if style.resolved_font_family_east_asia.is_some() {
+            merged.resolved_font_family_east_asia =
+                style.resolved_font_family_east_asia.clone();
+        }
+        if style.resolved_font_family_cs.is_some() {
+            merged.resolved_font_family_cs = style.resolved_font_family_cs.clone();
+        }
+        if style.font_hint.is_some() {
+            merged.font_hint = style.font_hint.clone();
+        }
+        if style.language.is_some() {
+            merged.language = style.language.clone();
+        }
+        if style.language_east_asia.is_some() {
+            merged.language_east_asia = style.language_east_asia.clone();
+        }
+        if style.language_bidi.is_some() {
+            merged.language_bidi = style.language_bidi.clone();
+        }
+        if style.right_to_left.is_some() {
+            merged.right_to_left = style.right_to_left;
+        }
+        if style.complex_script.is_some() {
+            merged.complex_script = style.complex_script;
+        }
         if style.character_spacing_twips.is_some() {
             merged.character_spacing_twips = style.character_spacing_twips;
         }
@@ -1052,6 +1129,25 @@ pub fn merge_text_styles(
         || merged.background_color.is_some()
         || merged.font_size_pt.is_some()
         || merged.font_family.is_some()
+        || merged.source_font_family.is_some()
+        || merged.font_family_ascii.is_some()
+        || merged.font_family_h_ansi.is_some()
+        || merged.font_family_east_asia.is_some()
+        || merged.font_family_cs.is_some()
+        || merged.font_theme_ascii.is_some()
+        || merged.font_theme_h_ansi.is_some()
+        || merged.font_theme_east_asia.is_some()
+        || merged.font_theme_cs.is_some()
+        || merged.resolved_font_family_ascii.is_some()
+        || merged.resolved_font_family_h_ansi.is_some()
+        || merged.resolved_font_family_east_asia.is_some()
+        || merged.resolved_font_family_cs.is_some()
+        || merged.font_hint.is_some()
+        || merged.language.is_some()
+        || merged.language_east_asia.is_some()
+        || merged.language_bidi.is_some()
+        || merged.right_to_left.is_some()
+        || merged.complex_script.is_some()
         || merged.character_spacing_twips.is_some()
         || merged.vertical_align.is_some()
         || merged.run_border.is_some();
@@ -1408,6 +1504,13 @@ pub fn parse_text_style_from_xml(xml: &str, theme_fonts: &ThemeFontMap) -> Optio
     let h_ansi_theme_font = get_attribute(&run_fonts_tag, "w:hAnsiTheme");
     let east_asia_theme_font = get_attribute(&run_fonts_tag, "w:eastAsiaTheme");
     let complex_script_theme_font = get_attribute(&run_fonts_tag, "w:csTheme");
+    let font_hint = get_attribute(&run_fonts_tag, "w:hint");
+    let language_tag = super::scan::find_tag_token(xml, "w:lang").unwrap_or_default();
+    let language = get_attribute(&language_tag, "w:val");
+    let language_east_asia = get_attribute(&language_tag, "w:eastAsia");
+    let language_bidi = get_attribute(&language_tag, "w:bidi");
+    let right_to_left = parse_on_off_attribute(xml, "rtl");
+    let complex_script = parse_on_off_attribute(xml, "cs");
     let vertical_align_match =
         super::scan::find_attribute_value_in_tag(xml, "w:vertAlign", "w:val");
     let drawing_bold_match = find_drawing_rpr_attribute(xml, "b");
@@ -1433,6 +1536,25 @@ pub fn parse_text_style_from_xml(xml: &str, theme_fonts: &ThemeFontMap) -> Optio
         background_color: None,
         font_size_pt: None,
         font_family: None,
+        source_font_family: None,
+        font_family_ascii: None,
+        font_family_h_ansi: None,
+        font_family_east_asia: None,
+        font_family_cs: None,
+        font_theme_ascii: None,
+        font_theme_h_ansi: None,
+        font_theme_east_asia: None,
+        font_theme_cs: None,
+        resolved_font_family_ascii: None,
+        resolved_font_family_h_ansi: None,
+        resolved_font_family_east_asia: None,
+        resolved_font_family_cs: None,
+        font_hint: None,
+        language: None,
+        language_east_asia: None,
+        language_bidi: None,
+        right_to_left: None,
+        complex_script: None,
         character_spacing_twips: None,
         vertical_align: None,
         run_border: None,
@@ -1499,15 +1621,46 @@ pub fn parse_text_style_from_xml(xml: &str, theme_fonts: &ThemeFontMap) -> Optio
         style.font_size_pt = Some(size_raw / 100.0);
     }
 
-    let run_font_family = ascii_font.or(h_ansi_font);
-    let run_theme_font_token = ascii_theme_font.or(h_ansi_theme_font);
+    style.font_family_ascii = ascii_font.clone();
+    style.font_family_h_ansi = h_ansi_font.clone();
+    style.font_family_east_asia = east_asia_font.clone();
+    style.font_family_cs = complex_script_font.clone();
+    style.font_theme_ascii = ascii_theme_font.clone();
+    style.font_theme_h_ansi = h_ansi_theme_font.clone();
+    style.font_theme_east_asia = east_asia_theme_font.clone();
+    style.font_theme_cs = complex_script_theme_font.clone();
+    style.resolved_font_family_ascii = ascii_theme_font
+        .as_deref()
+        .and_then(|token| resolve_theme_font(Some(token), theme_fonts))
+        .or_else(|| ascii_font.clone());
+    style.resolved_font_family_h_ansi = h_ansi_theme_font
+        .as_deref()
+        .and_then(|token| resolve_theme_font(Some(token), theme_fonts))
+        .or_else(|| h_ansi_font.clone());
+    style.resolved_font_family_east_asia = east_asia_theme_font
+        .as_deref()
+        .and_then(|token| resolve_theme_font(Some(token), theme_fonts))
+        .or_else(|| east_asia_font.clone());
+    style.resolved_font_family_cs = complex_script_theme_font
+        .as_deref()
+        .and_then(|token| resolve_theme_font(Some(token), theme_fonts))
+        .or_else(|| complex_script_font.clone());
+    style.font_hint = font_hint;
+    style.language = language;
+    style.language_east_asia = language_east_asia;
+    style.language_bidi = language_bidi;
+    style.right_to_left = right_to_left;
+    style.complex_script = complex_script;
+
+    let run_font_family = ascii_font.clone().or(h_ansi_font.clone());
+    let run_theme_font_token = ascii_theme_font.clone().or(h_ansi_theme_font.clone());
     let east_asia_fallback_font = if contains_east_asia {
         east_asia_font.clone()
     } else {
         None
     };
     let east_asia_fallback_theme_token = if contains_east_asia {
-        east_asia_theme_font
+        east_asia_theme_font.clone()
     } else {
         None
     };
@@ -1517,12 +1670,12 @@ pub fn parse_text_style_from_xml(xml: &str, theme_fonts: &ThemeFontMap) -> Optio
         None
     };
     let complex_script_fallback_theme_token = if contains_complex_script {
-        complex_script_theme_font
+        complex_script_theme_font.clone()
     } else {
         None
     };
     let symbol_fallback_font = {
-        let candidate = east_asia_font.or(complex_script_font);
+        let candidate = east_asia_font.clone().or(complex_script_font.clone());
         candidate.filter(|font| {
             let lower = font.to_ascii_lowercase();
             lower.contains("symbol")
@@ -1556,6 +1709,7 @@ pub fn parse_text_style_from_xml(xml: &str, theme_fonts: &ThemeFontMap) -> Optio
     } else if let Some(font_family) = drawing_font_match {
         style.font_family = Some(font_family);
     }
+    style.source_font_family = style.font_family.clone();
 
     if let Some(vertical_align_value) = vertical_align_match.map(|value| value.to_ascii_lowercase())
     {

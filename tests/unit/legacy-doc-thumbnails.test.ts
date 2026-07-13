@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -11,10 +11,15 @@ import {
 } from "@extend-ai/react-docx";
 
 const FIXTURES = join(__dirname, "../../crates/docx-core/tests/fixtures-doc");
+const THUMBNAIL_TWIN = "patient_original (3)";
+const HAS_THUMBNAIL_TWIN = existsSync(join(FIXTURES, `${THUMBNAIL_TWIN}.docx`));
 
 function fixtureBuffer(name: string): ArrayBuffer {
   const bytes = readFileSync(join(FIXTURES, name));
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  );
 }
 
 async function thumbnailsFor(name: string): Promise<{
@@ -40,27 +45,30 @@ async function thumbnailsFor(name: string): Promise<{
 }
 
 describe("legacy .doc thumbnails", () => {
-  it("produces per-page thumbnails for a .doc identical in shape to its .docx twin", async () => {
-    const doc = await thumbnailsFor("patient_original (3).doc");
-    const docx = await thumbnailsFor("patient_original (3).docx");
+  it.skipIf(!HAS_THUMBNAIL_TWIN)(
+    "produces per-page thumbnails for a .doc identical in shape to its .docx twin",
+    async () => {
+      const doc = await thumbnailsFor(`${THUMBNAIL_TWIN}.doc`);
+      const docx = await thumbnailsFor(`${THUMBNAIL_TWIN}.docx`);
 
-    expect(doc.thumbnails.thumbnails.length).toBeGreaterThan(0);
-    expect(doc.thumbnails.thumbnails.length).toBe(
-      docx.thumbnails.thumbnails.length
-    );
-
-    for (const thumbnail of doc.thumbnails.thumbnails) {
-      expect(thumbnail.widthPx).toBeGreaterThan(0);
-      expect(thumbnail.heightPx).toBeGreaterThan(0);
-      expect(typeof thumbnail.paint).toBe("function");
-      expect(thumbnail.aspectRatio).toBeCloseTo(
-        thumbnail.sourceWidthPx / Math.max(1, thumbnail.sourceHeightPx)
+      expect(doc.thumbnails.thumbnails.length).toBeGreaterThan(0);
+      expect(doc.thumbnails.thumbnails.length).toBe(
+        docx.thumbnails.thumbnails.length
       );
-    }
 
-    // Same pipeline, comparable cost: .doc setup must stay within 3x of the
-    // .docx twin (both are typically a few ms; guard against a format-specific
-    // slow path sneaking in).
-    expect(doc.setupMs).toBeLessThan(Math.max(250, docx.setupMs * 3));
-  });
+      for (const thumbnail of doc.thumbnails.thumbnails) {
+        expect(thumbnail.widthPx).toBeGreaterThan(0);
+        expect(thumbnail.heightPx).toBeGreaterThan(0);
+        expect(typeof thumbnail.paint).toBe("function");
+        expect(thumbnail.aspectRatio).toBeCloseTo(
+          thumbnail.sourceWidthPx / Math.max(1, thumbnail.sourceHeightPx)
+        );
+      }
+
+      // Same pipeline, comparable cost: .doc setup must stay within 3x of the
+      // .docx twin (both are typically a few ms; guard against a format-specific
+      // slow path sneaking in).
+      expect(doc.setupMs).toBeLessThan(Math.max(250, docx.setupMs * 3));
+    }
+  );
 });
