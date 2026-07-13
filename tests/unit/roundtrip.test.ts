@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { createMinimalDocxPackage, packageToArrayBuffer, parseDocx } from "@extend-ai/react-docx-ooxml-core";
+import {
+  createMinimalDocxPackage,
+  packageToArrayBuffer,
+  parseDocx,
+} from "@extend-ai/react-docx-ooxml-core";
 import { buildDocModel } from "@extend-ai/react-docx-doc-model";
-import { insertParagraph, setParagraphHeading, setRunHighlight, toggleRunStyleFlag } from "@extend-ai/react-docx-editor-ops";
-import { serializeDocModel, serializeDocx } from "@extend-ai/react-docx-serializer";
+import {
+  insertParagraph,
+  setParagraphHeading,
+  setRunHighlight,
+  toggleRunStyleFlag,
+  updateParagraphText,
+} from "@extend-ai/react-docx-editor-ops";
+import {
+  serializeDocModel,
+  serializeDocx,
+} from "@extend-ai/react-docx-serializer";
 
 const DOCUMENT_XML =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Source Paragraph</w:t></w:r></w:p></w:body></w:document>';
@@ -18,15 +31,189 @@ const DOCUMENT_WITH_RUN_BORDER_XML =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:bdr w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:rPr><w:t>box</w:t></w:r></w:p></w:body></w:document>';
 const DOCUMENT_WITH_RUN_SHADING_XML =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:color w:val="FFFFFF"/><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:rPr><w:t>inverse video</w:t></w:r></w:p></w:body></w:document>';
+const DOCUMENT_WITH_UNMODELED_TEXT_MARKUP_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="1234ABCD"><w:pPr><w:keepLines/><w:contextualSpacing/><w:mirrorIndents/></w:pPr><w:r><w:rPr><w:b/><w:lang w:val="en-US"/><w14:textOutline w14:w="12700"/></w:rPr><w:t>Alpha</w:t></w:r><w:r><w:rPr><w:i/><w:rtl/></w:rPr><w:t>Beta</w:t></w:r></w:p></w:body></w:document>';
+const DOCUMENT_WITH_FORM_FIELD_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p w:rsidR="00ABCDEF"><w:proofErr w:type="spellStart"/><w:sdt><w:sdtPr><w:alias w:val="Preserve field"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>Field value</w:t></w:r></w:sdtContent></w:sdt><w:proofErr w:type="spellEnd"/></w:p></w:body></w:document>';
+const DOCUMENT_WITH_THREE_STYLED_RUNS_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>A</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>B</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>C</w:t></w:r></w:p></w:body></w:document>';
+const DOCUMENT_WITH_REVISION_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins w:id="1" w:author="Original Author" w:date="2026-01-01T00:00:00Z"><w:r><w:t>A</w:t></w:r></w:ins></w:p></w:body></w:document>';
+const DOCUMENT_WITH_EXPLICIT_XML_SPACE =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space = "default">Alpha</w:t></w:r></w:p></w:body></w:document>';
+const DOCUMENT_WITH_NOTE_REFERENCES_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>A</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:t>B</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r><w:r><w:t>C</w:t></w:r></w:p></w:body></w:document>';
+const DOCUMENT_WITH_SIMPLE_FIELD_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr=" DATE \\@ &quot;MMMM d, yyyy&quot; "><w:r><w:t>July 9, 2026</w:t></w:r></w:fldSimple></w:p></w:body></w:document>';
 
 describe("round-trip", () => {
+  it("patches plain paragraph text without dropping unmodeled Word markup", async () => {
+    const seed = createMinimalDocxPackage(
+      DOCUMENT_WITH_UNMODELED_TEXT_MARKUP_XML
+    );
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+
+    const edited = updateParagraphText(model, 0, "AlphaxBeta");
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+
+    expect(xml).toContain('w14:paraId="1234ABCD"');
+    expect(xml).toContain("<w:keepLines/>");
+    expect(xml).toContain("<w:contextualSpacing/>");
+    expect(xml).toContain("<w:mirrorIndents/>");
+    expect(xml).toContain('<w:lang w:val="en-US"/>');
+    expect(xml).toContain('<w14:textOutline w14:w="12700"/>');
+    expect(xml).toContain("<w:rtl/>");
+    expect(xml).toContain("<w:t>Alphax</w:t>");
+    expect(xml).toContain("<w:t>Beta</w:t>");
+  });
+
+  it("keeps untouched mixed-content source XML verbatim", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_FORM_FIELD_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const serialized = await serializeDocModel(model, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+    const sourceParagraph =
+      DOCUMENT_WITH_FORM_FIELD_XML.match(/<w:p\b[\s\S]*<\/w:p>/)?.[0];
+
+    expect(sourceParagraph).toBeDefined();
+    expect(xml).toContain(sourceParagraph);
+  });
+
+  it("treats a redundant mixed-content text update as a no-op", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_FORM_FIELD_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const originalParagraph = model.nodes[0];
+    const edited = updateParagraphText(model, 0, "Field value");
+
+    expect(edited.nodes[0]).toBe(originalParagraph);
+    expect(edited.nodes[0]?.sourceXml).toBe(originalParagraph?.sourceXml);
+  });
+
+  it("regenerates instead of applying text to a mismatched source run style", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_THREE_STYLED_RUNS_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, "AXC", {
+      insertedStyle: { color: "#ff0000" },
+    });
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+
+    expect(xml).toContain('<w:color w:val="ff0000"/></w:rPr><w:t>X</w:t>');
+    expect(xml).not.toContain("<w:i/></w:rPr><w:t>X</w:t>");
+  });
+
+  it("revalidates source patch provenance after later model mutations", async () => {
+    const seed = createMinimalDocxPackage(
+      DOCUMENT_WITH_UNMODELED_TEXT_MARKUP_XML
+    );
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, "AlphaxBeta");
+    const paragraph = edited.nodes[0];
+    if (
+      paragraph?.type !== "paragraph" ||
+      paragraph.children[0]?.type !== "text"
+    ) {
+      throw new Error("expected text paragraph");
+    }
+    paragraph.children[0].style = {
+      ...paragraph.children[0].style,
+      color: "#00aa00",
+    };
+
+    const editedAgain = updateParagraphText(edited, 0, "AlphaxyBeta");
+    const serialized = await serializeDocModel(editedAgain, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+    expect(xml).toContain('<w:color w:val="00aa00"/>');
+    expect(xml).toContain("Alphaxy");
+    expect(xml).not.toContain("<w14:textOutline");
+  });
+
+  it("does not rewrite text inside an existing revision wrapper", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_REVISION_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, "B");
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+
+    expect(xml).toContain("<w:t>B</w:t>");
+    expect(xml).not.toContain("<w:ins");
+    expect(xml).not.toContain("Original Author");
+  });
+
+  it("updates an existing xml:space value without duplicating it", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_EXPLICIT_XML_SPACE);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, " Alpha ");
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+
+    expect(xml).toContain('xml:space = "preserve"');
+    expect(xml.match(/xml:space/gi)).toHaveLength(1);
+    expect(xml).toContain("> Alpha </w:t>");
+  });
+
+  it("retains footnote and endnote markers when surrounding text is edited", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_NOTE_REFERENCES_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, "AXBC");
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+
+    expect(xml).toContain('<w:footnoteReference w:id="1"/>');
+    expect(xml).toContain('<w:endnoteReference w:id="2"/>');
+    expect(xml).toContain("X");
+
+    const reparsed = await parseDocx(await packageToArrayBuffer(serialized));
+    const reparsedModel = await buildDocModel(reparsed);
+    const paragraph = reparsedModel.nodes[0];
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type !== "paragraph") {
+      throw new Error("expected a paragraph");
+    }
+    expect(
+      paragraph.children
+        .filter((child) => child.type === "text" && child.noteReference)
+        .map((child) =>
+          child.type === "text" ? child.noteReference : undefined
+        )
+    ).toEqual([
+      { kind: "footnote", id: 1 },
+      { kind: "endnote", id: 2 },
+    ]);
+  });
+
+  it("fails closed instead of rewriting a simple field result", async () => {
+    const seed = createMinimalDocxPackage(DOCUMENT_WITH_SIMPLE_FIELD_XML);
+    const pkg = await parseDocx(await packageToArrayBuffer(seed));
+    const model = await buildDocModel(pkg);
+    const edited = updateParagraphText(model, 0, "July 10, 2026");
+
+    expect(edited).toBe(model);
+    const serialized = await serializeDocModel(edited, pkg);
+    const xml = serialized.parts.get("word/document.xml")?.content ?? "";
+    expect(xml).toContain(
+      '<w:fldSimple w:instr=" DATE \\@ &quot;MMMM d, yyyy&quot; ">'
+    );
+    expect(xml).toContain("July 9, 2026");
+    expect(xml).not.toContain("July 10, 2026");
+  });
+
   it("builds model, edits it, then serializes back to document.xml", async () => {
     const seed = createMinimalDocxPackage(DOCUMENT_XML);
     const pkg = await parseDocx(await packageToArrayBuffer(seed));
     const model = await buildDocModel(pkg);
     const edited = insertParagraph(model, "Added by test", model.nodes.length, {
       paragraphStyle: { align: "center" },
-      runStyle: { bold: true, color: "#0055aa", fontSizePt: 14 }
+      runStyle: { bold: true, color: "#0055aa", fontSizePt: 14 },
     });
     const headed = setParagraphHeading(edited, 1, 2);
     const highlighted = setRunHighlight(headed, 1, 0, "yellow");
@@ -53,9 +240,11 @@ describe("round-trip", () => {
     const reparsed = await parseDocx(exported);
     const reparsedModel = await buildDocModel(reparsed);
 
-    expect(reparsedModel.nodes.some((node) => node.children.some((run) => run.text.includes("Another paragraph")))).toBe(
-      true
-    );
+    expect(
+      reparsedModel.nodes.some((node) =>
+        node.children.some((run) => run.text.includes("Another paragraph"))
+      )
+    ).toBe(true);
   });
 
   it("serializes paragraph border definitions to pBdr", async () => {
@@ -72,17 +261,17 @@ describe("round-trip", () => {
               type: "single",
               sizeEighthPt: 8,
               spacePt: 0,
-              color: "#2f5496"
-            }
-          }
+              color: "#2f5496",
+            },
+          },
         },
         children: [
           {
             type: "text",
-            text: "Border paragraph"
-          }
-        ]
-      }
+            text: "Border paragraph",
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -108,8 +297,11 @@ describe("round-trip", () => {
       {
         type: "text",
         text: "AB",
-        style: paragraph.children[0]?.type === "text" ? paragraph.children[0].style : undefined
-      }
+        style:
+          paragraph.children[0]?.type === "text"
+            ? paragraph.children[0].style
+            : undefined,
+      },
     ];
     paragraph.sourceXml = undefined;
 
@@ -148,8 +340,8 @@ describe("round-trip", () => {
       {
         type: "text",
         text: "boxed",
-        style: run.style
-      }
+        style: run.style,
+      },
     ];
     paragraph.sourceXml = undefined;
 
@@ -183,15 +375,17 @@ describe("round-trip", () => {
       {
         type: "text",
         text: "inverse video updated",
-        style: run.style
-      }
+        style: run.style,
+      },
     ];
     paragraph.sourceXml = undefined;
 
     const serialized = await serializeDocModel(model, pkg);
     const xml = serialized.parts.get("word/document.xml")?.content ?? "";
     expect(xml).toContain('<w:color w:val="FFFFFF"/>');
-    expect(xml).toContain('<w:shd w:val="clear" w:color="auto" w:fill="000000"/>');
+    expect(xml).toContain(
+      '<w:shd w:val="clear" w:color="auto" w:fill="000000"/>'
+    );
     expect(xml).toContain("inverse video updated");
   });
 
@@ -207,15 +401,16 @@ describe("round-trip", () => {
           {
             type: "text",
             text: "OpenAI",
-            link: "https://openai.com"
-          }
-        ]
-      }
+            link: "https://openai.com",
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
     const xml = serialized.parts.get("word/document.xml")?.content ?? "";
-    const rels = serialized.parts.get("word/_rels/document.xml.rels")?.content ?? "";
+    const rels =
+      serialized.parts.get("word/_rels/document.xml.rels")?.content ?? "";
 
     expect(xml).toContain("<w:hyperlink");
     expect(xml).toContain("OpenAI");
@@ -238,19 +433,19 @@ describe("round-trip", () => {
             fieldType: "checkbox",
             checked: true,
             checkedSymbol: "☒",
-            uncheckedSymbol: "☐"
+            uncheckedSymbol: "☐",
           },
           {
             type: "text",
-            text: " Name: "
+            text: " Name: ",
           },
           {
             type: "form-field",
             fieldType: "text",
-            value: "Jane Doe"
-          }
-        ]
-      }
+            value: "Jane Doe",
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -282,13 +477,13 @@ describe("round-trip", () => {
               checkbox: {
                 defaultChecked: true,
                 sizeMode: "exact",
-                sizePt: 10
-              }
-            }
+                sizePt: 10,
+              },
+            },
           },
           {
             type: "text",
-            text: " Name: "
+            text: " Name: ",
           },
           {
             type: "form-field",
@@ -300,12 +495,12 @@ describe("round-trip", () => {
                 inputType: "regular",
                 defaultText: "John Doe",
                 maxLength: 25,
-                textFormat: "titleCase"
-              }
-            }
-          }
-        ]
-      }
+                textFormat: "titleCase",
+              },
+            },
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -339,12 +534,12 @@ describe("round-trip", () => {
                 inputType: "number",
                 defaultText: "0",
                 maxLength: 8,
-                textFormat: "0.00"
-              }
-            }
-          }
-        ]
-      }
+                textFormat: "0.00",
+              },
+            },
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -386,12 +581,12 @@ describe("round-trip", () => {
             fieldType: "text",
             widget: {
               text: {
-                inputType: "number"
-              }
-            }
-          }
-        ]
-      }
+                inputType: "number",
+              },
+            },
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -427,18 +622,22 @@ describe("round-trip", () => {
               distBPx: 0,
               wrapType: "topAndBottom",
               behindDocument: false,
-              zIndex: 251660288
-            }
-          }
-        ]
-      }
+              zIndex: 251660288,
+            },
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
     const xml = serialized.parts.get("word/document.xml")?.content ?? "";
     expect(xml).toContain("<wp:anchor");
-    expect(xml).toContain('<wp:positionH relativeFrom="page"><wp:align>center</wp:align></wp:positionH>');
-    expect(xml).toContain('<wp:positionV relativeFrom="paragraph"><wp:posOffset>9525</wp:posOffset></wp:positionV>');
+    expect(xml).toContain(
+      '<wp:positionH relativeFrom="page"><wp:align>center</wp:align></wp:positionH>'
+    );
+    expect(xml).toContain(
+      '<wp:positionV relativeFrom="paragraph"><wp:posOffset>9525</wp:posOffset></wp:positionV>'
+    );
     expect(xml).toContain("<wp:wrapTopAndBottom/>");
     expect(xml).toContain('<wp:extent cx="247650" cy="247650"/>');
 
@@ -458,11 +657,11 @@ describe("round-trip", () => {
     const seed = createMinimalDocxPackage(DOCUMENT_WITH_HEADER_XML);
     seed.parts.set("word/_rels/document.xml.rels", {
       name: "word/_rels/document.xml.rels",
-      content: DOCUMENT_RELS_WITH_HEADER
+      content: DOCUMENT_RELS_WITH_HEADER,
     });
     seed.parts.set("word/header1.xml", {
       name: "word/header1.xml",
-      content: HEADER_XML
+      content: HEADER_XML,
     });
     const contentTypes = seed.parts.get("[Content_Types].xml")?.content ?? "";
     if (!/PartName="\/word\/header1\.xml"/i.test(contentTypes)) {
@@ -471,7 +670,7 @@ describe("round-trip", () => {
         content: contentTypes.replace(
           "</Types>",
           '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>'
-        )
+        ),
       });
     }
 
@@ -483,15 +682,15 @@ describe("round-trip", () => {
       {
         ...(model.metadata.headerSections[0] ?? {
           partName: "word/header1.xml",
-          referenceType: "default" as const
+          referenceType: "default" as const,
         }),
         nodes: [
           {
             type: "paragraph",
-            children: [{ type: "text", text: "Updated Header" }]
-          }
-        ]
-      }
+            children: [{ type: "text", text: "Updated Header" }],
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -511,7 +710,7 @@ describe("round-trip", () => {
         style: {
           widthTwips: 5000,
           layout: "fixed",
-          columnWidthsTwips: [5000]
+          columnWidthsTwips: [5000],
         },
         rows: [
           {
@@ -519,7 +718,7 @@ describe("round-trip", () => {
             style: {
               heightTwips: 720,
               heightRule: "atLeast",
-              cantSplit: true
+              cantSplit: true,
             },
             cells: [
               {
@@ -527,14 +726,14 @@ describe("round-trip", () => {
                 nodes: [
                   {
                     type: "paragraph",
-                    children: [{ type: "text", text: "Row 1" }]
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      }
+                    children: [{ type: "text", text: "Row 1" }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);
@@ -567,21 +766,29 @@ describe("round-trip", () => {
                 type: "table-cell",
                 style: {
                   borders: {
-                    tl2br: { type: "single", sizeEighthPt: 8, color: "#ff0000" },
-                    tr2bl: { type: "single", sizeEighthPt: 8, color: "#00aa00" }
-                  }
+                    tl2br: {
+                      type: "single",
+                      sizeEighthPt: 8,
+                      color: "#ff0000",
+                    },
+                    tr2bl: {
+                      type: "single",
+                      sizeEighthPt: 8,
+                      color: "#00aa00",
+                    },
+                  },
                 },
                 nodes: [
                   {
                     type: "paragraph",
-                    children: [{ type: "text", text: "X" }]
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      }
+                    children: [{ type: "text", text: "X" }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
     ];
 
     const serialized = await serializeDocModel(model, pkg);

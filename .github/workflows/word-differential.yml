@@ -1,0 +1,135 @@
+name: Word differential
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: word-differential-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  word-differential:
+    name: Private Word corpus
+    if: ${{ vars.WORD_ORACLE_PRIVATE_ARTIFACT_NAME != '' && vars.WORD_ORACLE_PRIVATE_ARTIFACT_RUN_ID != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download immutable private corpus artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ vars.WORD_ORACLE_PRIVATE_ARTIFACT_NAME }}
+          path: .word-oracle-private
+          run-id: ${{ vars.WORD_ORACLE_PRIVATE_ARTIFACT_RUN_ID }}
+          github-token: ${{ github.token }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install JavaScript and comparator dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          python -m pip install --disable-pip-version-check -r scripts/word-oracle/requirements.txt
+          sudo apt-get update
+          sudo apt-get install --yes poppler-utils
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Validate private corpus and pinned inputs
+        run: |
+          test -s .word-oracle-private/word-oracle.json
+          test -s .word-oracle-private/thresholds.json
+          test -s .word-oracle-private/font-fingerprint.txt
+          test -s .word-oracle-private/poppler-version.txt
+          pnpm run word-oracle:validate -- \
+            --manifest .word-oracle-private/word-oracle.json
+
+      - name: Verify pinned Poppler runtime
+        run: |
+          EXPECTED_VERSION=$(tr -d '\r\n' < .word-oracle-private/poppler-version.txt)
+          ACTUAL_VERSION=$(pdftoppm -v 2>&1 | sed -n '1p' | tr -d '\r')
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "Expected $EXPECTED_VERSION"
+            echo "Received $ACTUAL_VERSION"
+            exit 1
+          fi
+
+      - name: Verify pinned browser font runtime
+        run: |
+          EXPECTED_FONT_FINGERPRINT=$(tr -d '\r\n' < .word-oracle-private/font-fingerprint.txt)
+          ACTUAL_FONT_FINGERPRINT=$(node scripts/word-oracle/font-fingerprint.mjs \
+            --expected "$EXPECTED_FONT_FINGERPRINT")
+          echo "WORD_ORACLE_FONT_FINGERPRINT=$ACTUAL_FONT_FINGERPRINT" >> "$GITHUB_ENV"
+
+      - name: Materialize Microsoft Word reference pages
+        run: |
+          pnpm run word-oracle:materialize -- \
+            --manifest .word-oracle-private/word-oracle.json \
+            --out-dir .artifacts/word-reference-pages
+
+      - name: Start development playground
+        run: |
+          nohup pnpm --filter @extend-ai/react-docx-playground dev \
+            --host 127.0.0.1 --port 4173 \
+            > "$RUNNER_TEMP/react-docx-playground.log" 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4173 >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/react-docx-playground.log"
+          exit 1
+
+      - name: Capture react-docx pages
+        run: |
+          pnpm run word-oracle:capture -- \
+            --manifest .word-oracle-private/word-oracle.json \
+            --references .artifacts/word-reference-pages/reference-pages.json \
+            --base-url http://127.0.0.1:4173 \
+            --out-dir .artifacts/viewer-pages \
+            --font-fingerprint "$WORD_ORACLE_FONT_FINGERPRINT"
+
+      - name: Enforce Word differential thresholds
+        run: |
+          pnpm run word-oracle:compare -- \
+            --references .artifacts/word-reference-pages/reference-pages.json \
+            --viewer .artifacts/viewer-pages/viewer-pages.json \
+            --thresholds .word-oracle-private/thresholds.json \
+            --out .artifacts/word-comparison/report.json
+
+      - name: Upload comparison report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: word-differential-report-${{ github.run_id }}
+          path: |
+            .artifacts/word-comparison/report.json
+            ${{ runner.temp }}/react-docx-playground.log
+          if-no-files-found: warn
+          retention-days: 14

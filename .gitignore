@@ -6,9 +6,12 @@ node_modules
 dist
 target/
 coverage
+__pycache__/
 playwright-report
 test-results
 .playwright-cli/
+.artifacts/
+.word-oracle-private/
 tmp-image2.wmf
 *.tsbuildinfo
 .DS_Store
@@ -25,10 +28,12 @@ viewer-visual-fidelity-report.md
 viewer-visual-fidelity-artifacts/
 comparison-pairs.json
 comparison-results.json
-tests/visual/
 tests/fixtures/docx-regression/
 tests/fixtures/docx-regression-local/
+tests/visual/legacy-doc-render.spec.ts
+tests/visual/zoomed-virtualization.spec.ts
 *.docx
+*.pdf
 *.avif
 *.bmp
 *.gif

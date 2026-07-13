@@ -101,27 +101,29 @@ describe("docx comments", () => {
     expect(markup).toContain("Ada Lovelace");
     expect(markup).toContain('data-docx-gutter-annotation="comment"');
     expect(markup).toContain("Comment · Resolved");
+    expect(markup).toContain(">Reopen</button>");
     // The commented run gets the inline highlight.
     expect(markup).toContain('data-docx-comment-ids="7"');
     expect(markup).toContain("rgba(143, 106, 200");
   });
 
   it("renders no comment artifacts when comments are hidden", () => {
+    let hiddenComments: DocxComment[] = [];
     const markup = renderToStaticMarkup(
-      React.createElement(
-        function HiddenComments(): React.JSX.Element {
-          const editor = useDocxEditor({ starterModel: commentedModel() });
-          return React.createElement(DocxEditorViewer, {
-            editor,
-            mode: "read-only",
-          });
-        }
-      )
+      React.createElement(function HiddenComments(): React.JSX.Element {
+        const editor = useDocxEditor({ starterModel: commentedModel() });
+        hiddenComments = useDocxComments(editor).comments;
+        return React.createElement(DocxEditorViewer, {
+          editor,
+          mode: "read-only",
+        });
+      })
     );
 
     expect(markup).not.toContain("Please tighten this sentence.");
     expect(markup).not.toContain('data-docx-gutter-annotation="comment"');
     expect(markup).not.toContain("data-docx-comment-ids");
     expect(markup).not.toContain("rgba(143, 106, 200");
+    expect(hiddenComments).toHaveLength(1);
   });
 });

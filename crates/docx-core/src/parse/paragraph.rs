@@ -2,7 +2,8 @@ use crate::model::{
     FormFieldCheckboxSizeMode, FormFieldCheckboxWidgetSettings, FormFieldDropdownWidgetSettings,
     FormFieldOption, FormFieldRunNode, FormFieldRunNodeType, FormFieldSourceKind, FormFieldTextWidgetSettings,
     FormFieldType, FormFieldWidgetSettings, NoteReference, NoteReferenceKind, ParagraphChildNode,
-    ParagraphNode, ParagraphNodeType, TextRunNode, TextRunNodeType, TextStyle,
+    ParagraphNode, ParagraphNodeType, ParagraphSourceTextPatch,
+    ParagraphSourceTextPatchRun, TextRunNode, TextRunNodeType, TextStyle,
 };
 use crate::parse::context::ParseContext;
 use crate::parse::re;
@@ -1168,11 +1169,26 @@ pub fn parse_paragraph_in_table(
         }));
     }
 
+    let source_run_provenance = children
+        .iter()
+        .map(|child| match child {
+            ParagraphChildNode::Text(run) => Some(ParagraphSourceTextPatchRun {
+                style: run.style.clone(),
+                link: run.link.clone(),
+                note_reference: run.note_reference.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|runs| ParagraphSourceTextPatch { runs });
+
     ParagraphNode {
         r#type: ParagraphNodeType::Paragraph,
         style: paragraph_style,
         paragraph_mark_deleted: if paragraph_mark_deleted { Some(true) } else { None },
         children,
         source_xml: Some(paragraph_xml.to_string()),
+        source_text_patch: None,
+        source_run_provenance,
     }
 }

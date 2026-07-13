@@ -1,28 +1,83 @@
 import type * as React from "react";
 import { describe, expect, it } from "vitest";
 import {
+  isDomSelectionDestroyed,
   isCompositionKeyboardEvent,
   shouldReissueDomSelectionRestore,
   stableInnerHtmlProp,
-  type DocxTextRange
+  type DocxTextRange,
 } from "../../packages/react-viewer/src/editor";
 
-function paragraphRange(nodeIndex: number, startOffset: number, endOffset = startOffset): DocxTextRange {
+describe("DOM selection invariant", () => {
+  it("preserves an expanded selection spanning paragraph hosts", () => {
+    expect(
+      isDomSelectionDestroyed({
+        hasLiveRange: true,
+        isCollapsed: false,
+        anchorIsElement: false,
+        rangeInsideFocusedHost: false,
+        rangeInsideViewer: true,
+      })
+    ).toBe(false);
+  });
+
+  it("restores a collapsed selection that escaped the focused host", () => {
+    expect(
+      isDomSelectionDestroyed({
+        hasLiveRange: true,
+        isCollapsed: true,
+        anchorIsElement: false,
+        rangeInsideFocusedHost: false,
+        rangeInsideViewer: true,
+      })
+    ).toBe(true);
+  });
+
+  it("restores a collapsed element anchor created by an innerHTML rewrite", () => {
+    expect(
+      isDomSelectionDestroyed({
+        hasLiveRange: true,
+        isCollapsed: true,
+        anchorIsElement: true,
+        rangeInsideFocusedHost: true,
+        rangeInsideViewer: true,
+      })
+    ).toBe(true);
+  });
+
+  it("restores a dropped native range", () => {
+    expect(
+      isDomSelectionDestroyed({
+        hasLiveRange: false,
+        isCollapsed: true,
+        anchorIsElement: false,
+        rangeInsideFocusedHost: false,
+        rangeInsideViewer: false,
+      })
+    ).toBe(true);
+  });
+});
+
+function paragraphRange(
+  nodeIndex: number,
+  startOffset: number,
+  endOffset = startOffset
+): DocxTextRange {
   return {
     start: {
       location: {
         kind: "paragraph",
-        nodeIndex
+        nodeIndex,
       },
-      offset: startOffset
+      offset: startOffset,
     },
     end: {
       location: {
         kind: "paragraph",
-        nodeIndex
+        nodeIndex,
       },
-      offset: endOffset
-    }
+      offset: endOffset,
+    },
   };
 }
 
@@ -35,7 +90,7 @@ describe("DOM selection restore gating", () => {
         rangeChanged: false,
         activeTextRange: paragraphRange(2, 3, 8),
         suppressNext: false,
-        selectionSessionKind: "idle"
+        selectionSessionKind: "idle",
       })
     ).toBe(false);
   });
@@ -48,7 +103,7 @@ describe("DOM selection restore gating", () => {
         rangeChanged: false,
         activeTextRange: paragraphRange(2, 3, 8),
         suppressNext: false,
-        selectionSessionKind: "pointer"
+        selectionSessionKind: "pointer",
       })
     ).toBe(false);
   });
@@ -61,7 +116,7 @@ describe("DOM selection restore gating", () => {
         rangeChanged: false,
         activeTextRange: paragraphRange(2, 3, 8),
         suppressNext: false,
-        selectionSessionKind: "idle"
+        selectionSessionKind: "idle",
       })
     ).toBe(true);
   });
@@ -74,7 +129,7 @@ describe("DOM selection restore gating", () => {
         rangeChanged: false,
         activeTextRange: paragraphRange(2, 3, 8),
         suppressNext: false,
-        selectionSessionKind: "composition"
+        selectionSessionKind: "composition",
       })
     ).toBe(false);
   });
@@ -87,7 +142,7 @@ describe("DOM selection restore gating", () => {
         rangeChanged: true,
         activeTextRange: paragraphRange(2, 3, 8),
         suppressNext: false,
-        selectionSessionKind: "composition"
+        selectionSessionKind: "composition",
       })
     ).toBe(false);
   });
@@ -102,8 +157,8 @@ function keyboardEvent(options: {
     key: options.key,
     keyCode: options.keyCode,
     nativeEvent: {
-      isComposing: options.isComposing ?? false
-    }
+      isComposing: options.isComposing ?? false,
+    },
   } as unknown as React.KeyboardEvent<HTMLElement>;
 }
 

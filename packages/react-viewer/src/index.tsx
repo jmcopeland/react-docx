@@ -6,15 +6,23 @@ import {
   type LayoutOptions,
   type LayoutParagraphBlock,
   type LayoutRun,
-  type LayoutTableBlock
+  type LayoutTableBlock,
 } from "@extend-ai/react-docx-layout-engine";
 import { importDocxBuffer } from "./docx-import";
-import { DEFAULT_DOCUMENT_LAYOUT, parseSectionLayout, resolveDocumentLayout } from "./section-layout";
+import {
+  DEFAULT_DOCUMENT_LAYOUT,
+  parseSectionLayout,
+  resolveDocumentLayout,
+} from "./section-layout";
 import {
   imageUsesPlaceholderFallback,
   resolveRenderableImageSource,
-  unsupportedImageFallbackLabel
+  unsupportedImageFallbackLabel,
 } from "./image-render";
+import {
+  resolveDocxTextFontFamily,
+  segmentTextByDocxScriptFont,
+} from "./script-fonts";
 
 export interface ReactDocxViewerProps {
   /**
@@ -89,7 +97,7 @@ const HIGHLIGHT_TO_CSS: Record<string, string> = {
   black: "#111827",
   white: "#ffffff",
   darkgray: "#9ca3af",
-  lightgray: "#e5e7eb"
+  lightgray: "#e5e7eb",
 };
 const SCRIPT_FONT_SCALE = 0.65;
 
@@ -135,7 +143,7 @@ function headingFontSize(level?: 1 | 2 | 3 | 4 | 5 | 6): string | undefined {
 
 export function useDocxModel(file?: ArrayBuffer): UseDocxModelState {
   const [state, setState] = React.useState<UseDocxModelState>({
-    isLoading: Boolean(file)
+    isLoading: Boolean(file),
   });
 
   React.useEffect(() => {
@@ -153,14 +161,14 @@ export function useDocxModel(file?: ArrayBuffer): UseDocxModelState {
       try {
         const { model } = await importDocxBuffer(docxFile, {
           signal: abortController.signal,
-          transferBuffer: false
+          transferBuffer: false,
         });
         if (!isCurrent) {
           return;
         }
         setState({
           isLoading: false,
-          model
+          model,
         });
       } catch (error) {
         if (!isCurrent) {
@@ -168,7 +176,10 @@ export function useDocxModel(file?: ArrayBuffer): UseDocxModelState {
         }
         setState({
           isLoading: false,
-          error: error instanceof Error ? error : new Error("Unknown DOCX parse error")
+          error:
+            error instanceof Error
+              ? error
+              : new Error("Unknown DOCX parse error"),
         });
       }
     }
@@ -184,22 +195,26 @@ export function useDocxModel(file?: ArrayBuffer): UseDocxModelState {
   return state;
 }
 
-function runTextStyle(run: LayoutRun): React.CSSProperties {
+function runTextStyle(run: LayoutRun, text?: string): React.CSSProperties {
   if (run.kind === "image") {
     return {};
   }
 
   const hasScriptVerticalAlign =
-    run.style?.verticalAlign === "superscript" || run.style?.verticalAlign === "subscript";
+    run.style?.verticalAlign === "superscript" ||
+    run.style?.verticalAlign === "subscript";
   const verticalAlign =
     run.style?.verticalAlign === "superscript"
       ? "super"
       : run.style?.verticalAlign === "subscript"
-        ? "sub"
-        : undefined;
-  const textDecorationTokens = [run.style?.underline ? "underline" : "", run.style?.strike ? "line-through" : ""]
-    .filter(Boolean);
-  const textDecoration = textDecorationTokens.length > 0 ? textDecorationTokens.join(" ") : "none";
+      ? "sub"
+      : undefined;
+  const textDecorationTokens = [
+    run.style?.underline ? "underline" : "",
+    run.style?.strike ? "line-through" : "",
+  ].filter(Boolean);
+  const textDecoration =
+    textDecorationTokens.length > 0 ? textDecorationTokens.join(" ") : "none";
 
   const style: React.CSSProperties = {
     fontWeight: run.style?.bold ? 700 : undefined,
@@ -209,29 +224,51 @@ function runTextStyle(run: LayoutRun): React.CSSProperties {
     backgroundColor: resolveHighlightColor(run.style?.highlight),
     fontSize: run.style?.fontSizePt
       ? `${Number(
-          (run.style.fontSizePt * (hasScriptVerticalAlign ? SCRIPT_FONT_SCALE : 1)).toFixed(3)
+          (
+            run.style.fontSizePt *
+            (hasScriptVerticalAlign ? SCRIPT_FONT_SCALE : 1)
+          ).toFixed(3)
         )}pt`
       : hasScriptVerticalAlign
-        ? `${SCRIPT_FONT_SCALE}em`
-        : undefined,
-    fontFamily: run.style?.fontFamily,
+      ? `${SCRIPT_FONT_SCALE}em`
+      : undefined,
+    fontFamily: resolveDocxTextFontFamily(text ?? run.text, run.style),
     verticalAlign,
-    whiteSpace: "pre-wrap"
+    whiteSpace: "pre-wrap",
   };
 
   return style;
 }
 
+function renderRunText(
+  run: Extract<LayoutRun, { kind: "text" }>
+): React.ReactNode {
+  const segments = segmentTextByDocxScriptFont(run.text, run.style);
+  if (segments.length <= 1) {
+    return run.text;
+  }
+
+  return segments.map((segment, index) => (
+    <span
+      key={`${run.id}-script-${index}`}
+      style={{ fontFamily: segment.fontFamily }}
+    >
+      {segment.text}
+    </span>
+  ));
+}
+
 function linkRunTextStyle(run: LayoutRun): React.CSSProperties {
   const base = runTextStyle(run);
   const resolvedTextDecoration =
-    typeof base.textDecoration === "string" && base.textDecoration.trim().length > 0
+    typeof base.textDecoration === "string" &&
+    base.textDecoration.trim().length > 0
       ? base.textDecoration
       : "none";
   return {
     ...base,
     color: base.color ?? "inherit",
-    textDecoration: resolvedTextDecoration
+    textDecoration: resolvedTextDecoration,
   };
 }
 
@@ -253,7 +290,7 @@ function renderParagraphRuns(block: LayoutParagraphBlock): React.JSX.Element[] {
               color: "#6b7280",
               fontSize: 12,
               padding: 8,
-              marginInline: 4
+              marginInline: 4,
             }}
           >
             Missing image
@@ -261,7 +298,10 @@ function renderParagraphRuns(block: LayoutParagraphBlock): React.JSX.Element[] {
         );
       }
 
-      if (imageUsesPlaceholderFallback(run) || (run.src && !renderableImageSrc)) {
+      if (
+        imageUsesPlaceholderFallback(run) ||
+        (run.src && !renderableImageSrc)
+      ) {
         return (
           <span
             key={run.id}
@@ -279,13 +319,14 @@ function renderParagraphRuns(block: LayoutParagraphBlock): React.JSX.Element[] {
               borderRadius: 3,
               backgroundColor: "#ffffff",
               color: "#0f172a",
-              fontSize: (run.widthPx ?? 0) <= 56 && (run.heightPx ?? 0) <= 56 ? 12 : 10,
+              fontSize:
+                (run.widthPx ?? 0) <= 56 && (run.heightPx ?? 0) <= 56 ? 12 : 10,
               fontWeight: 700,
               textTransform: "lowercase",
               fontFamily: "Arial, sans-serif",
               lineHeight: 1,
               verticalAlign: "middle",
-              marginInline: 4
+              marginInline: 4,
             }}
           >
             {unsupportedImageFallbackLabel(run, run.widthPx, run.heightPx)}
@@ -302,7 +343,7 @@ function renderParagraphRuns(block: LayoutParagraphBlock): React.JSX.Element[] {
             maxWidth: run.widthPx ? `${run.widthPx}px` : "100%",
             maxHeight: run.heightPx ? `${run.heightPx}px` : undefined,
             verticalAlign: "middle",
-            marginInline: 4
+            marginInline: 4,
           }}
         />
       );
@@ -318,14 +359,14 @@ function renderParagraphRuns(block: LayoutParagraphBlock): React.JSX.Element[] {
           rel={run.link.startsWith("#") ? undefined : "noreferrer noopener"}
           style={linkRunTextStyle(run)}
         >
-          {run.text}
+          {renderRunText(run)}
         </a>
       );
     }
 
     return (
       <span key={run.id} style={textStyle}>
-        {run.text}
+        {renderRunText(run)}
       </span>
     );
   });
@@ -338,7 +379,7 @@ function renderTable(block: LayoutTableBlock): React.JSX.Element {
         width: "100%",
         borderCollapse: "collapse",
         tableLayout: "fixed",
-        marginBottom: 8
+        marginBottom: 8,
       }}
     >
       <tbody>
@@ -356,7 +397,7 @@ function renderTable(block: LayoutTableBlock): React.JSX.Element {
                   minWidth: 0,
                   wordWrap: "break-word",
                   overflowWrap: "break-word",
-                  wordBreak: "break-word"
+                  wordBreak: "break-word",
                 }}
               >
                 {cell.paragraphs.map((paragraph) => (
@@ -366,7 +407,7 @@ function renderTable(block: LayoutTableBlock): React.JSX.Element {
                       margin: 0,
                       textAlign: paragraph.align,
                       fontWeight: paragraph.headingLevel ? 700 : undefined,
-                      fontSize: headingFontSize(paragraph.headingLevel)
+                      fontSize: headingFontSize(paragraph.headingLevel),
                     }}
                   >
                     {renderParagraphRuns(paragraph)}
@@ -384,7 +425,7 @@ function renderTable(block: LayoutTableBlock): React.JSX.Element {
 const containerStyle: React.CSSProperties = {
   display: "grid",
   justifyItems: "center",
-  gap: 16
+  gap: 16,
 };
 
 function renderBlock(block: LayoutBlock): React.JSX.Element {
@@ -400,7 +441,7 @@ function renderBlock(block: LayoutBlock): React.JSX.Element {
         minHeight: block.height,
         textAlign: block.align,
         fontWeight: block.headingLevel ? 700 : undefined,
-        fontSize: headingFontSize(block.headingLevel)
+        fontSize: headingFontSize(block.headingLevel),
       }}
     >
       {renderParagraphRuns(block)}
@@ -413,9 +454,13 @@ export function ReactDocxViewer({
   model,
   className,
   layoutOptions,
-  emptyState
+  emptyState,
 }: ReactDocxViewerProps): React.JSX.Element {
-  const { model: parsedModel, isLoading, error } = useDocxModel(model ? undefined : file);
+  const {
+    model: parsedModel,
+    isLoading,
+    error,
+  } = useDocxModel(model ? undefined : file);
   const resolvedModel = model ?? parsedModel;
   const modelWithSections = React.useMemo(() => {
     if (!resolvedModel) {
@@ -430,7 +475,7 @@ export function ReactDocxViewer({
 
     return {
       ...resolvedModel,
-      nodes: [...headerNodes, ...resolvedModel.nodes, ...footerNodes]
+      nodes: [...headerNodes, ...resolvedModel.nodes, ...footerNodes],
     };
   }, [resolvedModel]);
 
@@ -443,7 +488,7 @@ export function ReactDocxViewer({
     return {
       ...layoutOptions,
       pageWidth: layoutOptions?.pageWidth ?? documentLayout.pageWidthPx,
-      pageHeight: layoutOptions?.pageHeight ?? documentLayout.pageHeightPx
+      pageHeight: layoutOptions?.pageHeight ?? documentLayout.pageHeightPx,
     } satisfies LayoutOptions;
   }, [layoutOptions, resolvedModel]);
 
@@ -459,19 +504,27 @@ export function ReactDocxViewer({
   }
 
   if (error) {
-    return <div className={className}>Failed to parse DOCX: {error.message}</div>;
+    return (
+      <div className={className}>Failed to parse DOCX: {error.message}</div>
+    );
   }
 
   if (!resolvedModel) {
     return <div className={className}>{emptyState ?? "No DOCX loaded."}</div>;
   }
 
-  const pageWidth = resolvedLayoutOptions?.pageWidth ?? DEFAULT_DOCUMENT_LAYOUT.pageWidthPx;
-  const pageHeight = resolvedLayoutOptions?.pageHeight ?? DEFAULT_DOCUMENT_LAYOUT.pageHeightPx;
+  const pageWidth =
+    resolvedLayoutOptions?.pageWidth ?? DEFAULT_DOCUMENT_LAYOUT.pageWidthPx;
+  const pageHeight =
+    resolvedLayoutOptions?.pageHeight ?? DEFAULT_DOCUMENT_LAYOUT.pageHeightPx;
   const pagePadding = resolvedLayoutOptions?.margin ?? 72;
 
   return (
-    <div className={className} data-testid="react-docx-viewer" style={containerStyle}>
+    <div
+      className={className}
+      data-testid="react-docx-viewer"
+      style={containerStyle}
+    >
       {pages.map((page) => (
         <section
           key={page.number}
@@ -486,7 +539,7 @@ export function ReactDocxViewer({
             boxShadow: "0 8px 24px rgba(0, 0, 0, 0.08)",
             display: "grid",
             gap: 8,
-            alignContent: "start"
+            alignContent: "start",
           }}
         >
           {page.blocks.map(renderBlock)}
@@ -526,6 +579,10 @@ export {
   type DocxTrackedChangeCardRenderProps,
   type DocxComment,
   type DocxCommentCardRenderProps,
+  type DocxCreateCommentOptions,
+  type DocxAnnotationCommandFailureReason,
+  type DocxAnnotationCommandResult,
+  type DocxCommentCreationCommandResult,
   type UseDocxCommentsResult,
   type DocxPageLayoutInfo,
   type DocxPaginationInfo,
@@ -572,13 +629,10 @@ export {
   useDocxComments,
   useDocxEditor,
   resolveDocxPageThumbnailResolution,
-  type UseDocxEditorOptions
+  type UseDocxEditorOptions,
 } from "./editor";
 
-export {
-  parseSectionLayout,
-  resolveDocumentLayout
-} from "./section-layout";
+export { parseSectionLayout, resolveDocumentLayout } from "./section-layout";
 
 export * from "@extend-ai/react-docx-ooxml-core";
 export * from "@extend-ai/react-docx-doc-model";

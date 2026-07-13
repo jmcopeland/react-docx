@@ -136,6 +136,25 @@ pub fn merge_text_styles(styles: &[Option<TextStyle>]) -> Option<TextStyle> {
         background_color: None,
         font_size_pt: None,
         font_family: None,
+        source_font_family: None,
+        font_family_ascii: None,
+        font_family_h_ansi: None,
+        font_family_east_asia: None,
+        font_family_cs: None,
+        font_theme_ascii: None,
+        font_theme_h_ansi: None,
+        font_theme_east_asia: None,
+        font_theme_cs: None,
+        resolved_font_family_ascii: None,
+        resolved_font_family_h_ansi: None,
+        resolved_font_family_east_asia: None,
+        resolved_font_family_cs: None,
+        font_hint: None,
+        language: None,
+        language_east_asia: None,
+        language_bidi: None,
+        right_to_left: None,
+        complex_script: None,
         character_spacing_twips: None,
         vertical_align: None,
         run_border: None,
@@ -170,6 +189,64 @@ pub fn merge_text_styles(styles: &[Option<TextStyle>]) -> Option<TextStyle> {
         }
         if style.font_family.is_some() {
             merged.font_family = style.font_family.clone();
+        }
+        if style.source_font_family.is_some() {
+            merged.source_font_family = style.source_font_family.clone();
+        }
+        if style.font_family_ascii.is_some() {
+            merged.font_family_ascii = style.font_family_ascii.clone();
+        }
+        if style.font_family_h_ansi.is_some() {
+            merged.font_family_h_ansi = style.font_family_h_ansi.clone();
+        }
+        if style.font_family_east_asia.is_some() {
+            merged.font_family_east_asia = style.font_family_east_asia.clone();
+        }
+        if style.font_family_cs.is_some() {
+            merged.font_family_cs = style.font_family_cs.clone();
+        }
+        if style.font_theme_ascii.is_some() {
+            merged.font_theme_ascii = style.font_theme_ascii.clone();
+        }
+        if style.font_theme_h_ansi.is_some() {
+            merged.font_theme_h_ansi = style.font_theme_h_ansi.clone();
+        }
+        if style.font_theme_east_asia.is_some() {
+            merged.font_theme_east_asia = style.font_theme_east_asia.clone();
+        }
+        if style.font_theme_cs.is_some() {
+            merged.font_theme_cs = style.font_theme_cs.clone();
+        }
+        if style.resolved_font_family_ascii.is_some() {
+            merged.resolved_font_family_ascii = style.resolved_font_family_ascii.clone();
+        }
+        if style.resolved_font_family_h_ansi.is_some() {
+            merged.resolved_font_family_h_ansi = style.resolved_font_family_h_ansi.clone();
+        }
+        if style.resolved_font_family_east_asia.is_some() {
+            merged.resolved_font_family_east_asia =
+                style.resolved_font_family_east_asia.clone();
+        }
+        if style.resolved_font_family_cs.is_some() {
+            merged.resolved_font_family_cs = style.resolved_font_family_cs.clone();
+        }
+        if style.font_hint.is_some() {
+            merged.font_hint = style.font_hint.clone();
+        }
+        if style.language.is_some() {
+            merged.language = style.language.clone();
+        }
+        if style.language_east_asia.is_some() {
+            merged.language_east_asia = style.language_east_asia.clone();
+        }
+        if style.language_bidi.is_some() {
+            merged.language_bidi = style.language_bidi.clone();
+        }
+        if style.right_to_left.is_some() {
+            merged.right_to_left = style.right_to_left;
+        }
+        if style.complex_script.is_some() {
+            merged.complex_script = style.complex_script;
         }
         if style.character_spacing_twips.is_some() {
             merged.character_spacing_twips = style.character_spacing_twips;
@@ -372,11 +449,11 @@ pub fn on_off_value_to_boolean(value: Option<&str>) -> Option<bool> {
     if value.is_empty() {
         return None;
     }
-    let normalized = value.to_ascii_lowercase();
-    if ["0", "false", "off", "no"].contains(&normalized.as_str()) {
-        return Some(false);
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
     }
-    Some(true)
 }
 
 pub fn decode_xml_attribute(value: Option<&str>) -> Option<String> {
@@ -951,5 +1028,23 @@ pub fn normalize_legacy_form_display_value(value: Option<&str>) -> Option<String
         None
     } else {
         Some(normalized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_off_value_to_boolean;
+
+    #[test]
+    fn parses_only_valid_st_on_off_lexical_values() {
+        for value in ["1", "true", "TRUE", "on", "ON"] {
+            assert_eq!(on_off_value_to_boolean(Some(value)), Some(true));
+        }
+        for value in ["0", "false", "FALSE", "off", "OFF"] {
+            assert_eq!(on_off_value_to_boolean(Some(value)), Some(false));
+        }
+        for value in ["", "yes", "no", "maybe"] {
+            assert_eq!(on_off_value_to_boolean(Some(value)), None);
+        }
     }
 }

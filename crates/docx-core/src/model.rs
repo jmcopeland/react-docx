@@ -128,6 +128,50 @@ pub struct TextStyle {
     pub font_size_pt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
+    /// Import-time `font_family` value used to distinguish a later edit through
+    /// the backwards-compatible single-family API from the preserved slots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_font_family: Option<String>,
+    /// Explicit OOXML `w:rFonts` slots. `font_family` remains the resolved
+    /// single-family fallback used by existing renderers and callers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_h_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_theme_ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_theme_h_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_theme_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_theme_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_font_family_ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_font_family_h_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    /// OOXML `w:lang` slots plus run-direction flags that participate in font
+    /// selection for complex-script text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_to_left: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complex_script: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_spacing_twips: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -656,6 +700,24 @@ pub struct ParagraphStyle {
     pub drop_cap: Option<ParagraphDropCap>,
 }
 
+/// Text-independent run provenance for a validated surgical source XML patch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphSourceTextPatchRun {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<TextStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_reference: Option<NoteReference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphSourceTextPatch {
+    pub runs: Vec<ParagraphSourceTextPatchRun>,
+}
+
 /// Mirrors TypeScript `ParagraphNode`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -669,6 +731,12 @@ pub struct ParagraphNode {
     pub paragraph_mark_deleted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_xml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_text_patch: Option<ParagraphSourceTextPatch>,
+    /// Immutable import-time run metadata used to prove that a later surgical
+    /// annotation edit is still targeting the exact parsed run state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_run_provenance: Option<ParagraphSourceTextPatch>,
 }
 
 /// Discriminator for `ParagraphNode`.
@@ -885,6 +953,14 @@ pub struct TableStyle {
     pub floating: Option<TableFloating>,
 }
 
+/// Text-only paragraph replacement retained inside an otherwise untouched table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSourceTextPatch {
+    pub source_paragraph_xml: String,
+    pub paragraph: ParagraphNode,
+}
+
 /// Mirrors TypeScript `TableNode`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -896,6 +972,8 @@ pub struct TableNode {
     pub style: Option<TableStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_xml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_text_patches: Option<Vec<TableSourceTextPatch>>,
 }
 
 /// Discriminator for `TableNode`.
@@ -1099,6 +1177,16 @@ pub struct DocumentCommentDefinition {
     pub parent_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_xml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_paragraph_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_resolved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_new: Option<bool>,
 }
 
 /// Mirrors TypeScript `DocumentCompatibilitySettings`.

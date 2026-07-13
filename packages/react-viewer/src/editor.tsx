@@ -31,11 +31,16 @@ import {
   type TextRunNode,
 } from "@extend-ai/react-docx-doc-model";
 import {
+  acceptParagraphRevision,
+  createParagraphComment,
+  rejectParagraphRevision,
+  setCommentResolved as setCommentResolvedInModel,
   splitParagraphChildrenAtTextOffsets,
   updateParagraphText,
   updateTableCellParagraphTextRecursive,
   updateTableCellParagraphText,
   updateTableCellText,
+  type AnnotationMutationFailureReason,
 } from "@extend-ai/react-docx-editor-ops";
 import { type OoxmlPackage } from "@extend-ai/react-docx-ooxml-core";
 import { serializeDocx } from "@extend-ai/react-docx-serializer";
@@ -77,6 +82,18 @@ import {
   subscribeRenderableImageSourceUpdates,
   unsupportedImageFallbackLabel,
 } from "./image-render";
+import {
+  resolveDocxTextFontFamily,
+  segmentTextByDocxScriptFont,
+  type DocxScriptFontSegment,
+} from "./script-fonts";
+import {
+  createTransactionalEditorStateReducer,
+  type EditorHistory,
+  type TransactionalEditorState,
+  type TransactionalEditorStateAction,
+  type TransactionalEditorStatePatch,
+} from "./editor-transaction-state";
 import {
   layoutItemsWithPretextAroundExclusions,
   layoutTextWithPretextAroundExclusions,
@@ -393,6 +410,7 @@ const paragraphDropCapBySourceXml = new Map<
 >();
 interface ParagraphTrackedInlineChange {
   id: string;
+  revisionId?: string;
   kind: DocxTrackedChangeKind;
   author?: string;
   date?: string;
@@ -1099,7 +1117,10 @@ export interface MeasuredTableRowHeightsEntry {
 
 export function resolveTableMeasuredRowHeightsForPagination(
   nodes: DocModel["nodes"],
-  tableMeasuredRowHeightsByBlockId: Record<string, MeasuredTableRowHeightsEntry>,
+  tableMeasuredRowHeightsByBlockId: Record<
+    string,
+    MeasuredTableRowHeightsEntry
+  >,
   options?: {
     allowMeasuredImportPagination?: boolean;
     allowContentSignatureValidatedTables?: boolean;
@@ -1944,7 +1965,9 @@ function parseSectionColumns(
       sectionPropertiesXml.match(/<w:pgSz\b[^>]*w:w="([\d.]+)"/i)?.[1]
     );
     const marginTag = sectionPropertiesXml.match(/<w:pgMar\b[^>]*\/?>/i)?.[0];
-    const marginLeftTwips = Number(marginTag?.match(/w:left="([\d.-]+)"/i)?.[1]);
+    const marginLeftTwips = Number(
+      marginTag?.match(/w:left="([\d.-]+)"/i)?.[1]
+    );
     const marginRightTwips = Number(
       marginTag?.match(/w:right="([\d.-]+)"/i)?.[1]
     );
@@ -1954,7 +1977,10 @@ function parseSectionColumns(
       Number.isFinite(marginRightTwips)
     ) {
       const bodyTwips = pageWidthTwips - marginLeftTwips - marginRightTwips;
-      const totalWidthTwips = widthsTwips.reduce((sum, value) => sum + value, 0);
+      const totalWidthTwips = widthsTwips.reduce(
+        (sum, value) => sum + value,
+        0
+      );
       columnGapTwips = Math.max(
         0,
         (bodyTwips - totalWidthTwips) / Math.max(1, columnCount - 1)
@@ -3687,11 +3713,27 @@ function normalizeTextRange(range: DocxTextRange): DocxTextRange {
   };
 }
 
-interface DocxHistorySnapshot {
-  model: DocModel;
-  selection: DocxEditorSelection;
-  activeTextRange?: DocxTextRange;
-}
+type DocxPendingRunStyle = NonNullable<TextRunNode["style"]>;
+
+type DocxEditorState = TransactionalEditorState<
+  DocModel,
+  DocxEditorSelection,
+  DocxTextRange,
+  DocxPendingRunStyle
+>;
+
+type DocxEditorStateAction = TransactionalEditorStateAction<
+  DocModel,
+  DocxEditorSelection,
+  DocxTextRange,
+  DocxPendingRunStyle
+>;
+
+type DocxEditorHistory = EditorHistory<
+  DocModel,
+  DocxEditorSelection,
+  DocxTextRange
+>;
 
 interface DocxHistoryRestoreRequest {
   nonce: number;
@@ -3706,11 +3748,13 @@ interface DocxEditorTransactionContext {
   pendingRunStyle?: TextRunNode["style"];
 }
 
-interface DocxEditorTransactionPatch {
-  model?: DocModel;
-  selection?: DocxEditorSelection;
-  activeTextRange?: DocxTextRange;
-  pendingRunStyle?: TextRunNode["style"];
+interface DocxEditorTransactionPatch
+  extends TransactionalEditorStatePatch<
+    DocModel,
+    DocxEditorSelection,
+    DocxTextRange,
+    DocxPendingRunStyle
+  > {
   status?: string;
   clearSelectedFormField?: boolean;
   pushHistory?: boolean;
@@ -3760,7 +3804,15 @@ export type DocxTrackedChangeKind =
 
 export interface DocxTrackedChange {
   id: string;
+  /** Document generation that produced this handle. */
+  documentLoadNonce: number;
+  /** Stable block identity used to reject shifted/stale handles. */
+  blockId?: string;
+  /** Opaque source-state signature used to fail closed after mutation. */
+  sourceFingerprint: string;
   inlineAnchorId?: string;
+  /** OOXML `w:id` used by safe accept/reject operations. */
+  revisionId?: string;
   kind: DocxTrackedChangeKind;
   author?: string;
   date?: string;
@@ -3779,6 +3831,12 @@ export interface DocxTrackedChange {
 export interface DocxComment {
   /** Stable identifier (unique per rendered anchor). */
   id: string;
+  /** Document generation that produced this handle. */
+  documentLoadNonce: number;
+  /** Stable block identity used to reject shifted/stale handles. */
+  blockId?: string;
+  /** Opaque source/comment signature used to fail closed after mutation. */
+  sourceFingerprint: string;
   /** Comment id from `word/comments.xml` (`w:id`). */
   commentId: number;
   author?: string;
@@ -3794,6 +3852,23 @@ export interface DocxComment {
   anchorText?: string;
   nodeIndex: number;
   location: DocxTextRangeLocation;
+}
+
+export type DocxAnnotationCommandFailureReason =
+  AnnotationMutationFailureReason;
+
+export type DocxAnnotationCommandResult =
+  | { ok: true }
+  | { ok: false; reason: DocxAnnotationCommandFailureReason };
+
+export type DocxCommentCreationCommandResult =
+  | { ok: true; commentId: number }
+  | { ok: false; reason: DocxAnnotationCommandFailureReason };
+
+export interface DocxCreateCommentOptions {
+  author?: string;
+  initials?: string;
+  date?: string;
 }
 
 export type DocxLineSpacingRule = "auto" | "exact" | "atLeast";
@@ -3943,6 +4018,20 @@ export interface DocxEditorController {
   syncPaginationInfo: (pagination: DocxPaginationInfo) => void;
   toggleShowTrackedChanges: () => void;
   toggleShowComments: () => void;
+  acceptTrackedChange: (
+    change: DocxTrackedChange
+  ) => DocxAnnotationCommandResult;
+  rejectTrackedChange: (
+    change: DocxTrackedChange
+  ) => DocxAnnotationCommandResult;
+  createComment: (
+    text: string,
+    options?: DocxCreateCommentOptions
+  ) => DocxCommentCreationCommandResult;
+  setCommentResolved: (
+    comment: DocxComment,
+    resolved: boolean
+  ) => DocxAnnotationCommandResult;
   importDocxFile: (file: File) => Promise<void>;
   newDocument: () => void;
   exportDocx: () => void;
@@ -4468,6 +4557,10 @@ export interface DocxTrackedChangeCardRenderProps {
   pageIndex: number;
   /** Positioning style computed by the viewer. Apply this to the card root. */
   style: React.CSSProperties;
+  /** Accept this change. Unsupported or stale markup fails closed. */
+  accept: () => DocxAnnotationCommandResult;
+  /** Reject this change. Unsupported or stale markup fails closed. */
+  reject: () => DocxAnnotationCommandResult;
 }
 
 export interface DocxCommentCardRenderProps {
@@ -4485,6 +4578,8 @@ export interface DocxCommentCardRenderProps {
   pageIndex: number;
   /** Positioning style computed by the viewer. Apply this to the card root. */
   style: React.CSSProperties;
+  /** Mark the comment resolved or reopen it. */
+  setResolved: (resolved: boolean) => DocxAnnotationCommandResult;
 }
 
 /**
@@ -4543,6 +4638,8 @@ export interface UseDocxTrackChangesResult {
   getChangesForLocation: (
     location: DocxTextRangeLocation
   ) => DocxTrackedChange[];
+  acceptChange: (change: DocxTrackedChange) => DocxAnnotationCommandResult;
+  rejectChange: (change: DocxTrackedChange) => DocxAnnotationCommandResult;
 }
 
 export interface UseDocxCommentsResult {
@@ -4552,6 +4649,14 @@ export interface UseDocxCommentsResult {
   toggleShowComments: () => void;
   commentsByLocation: Map<string, DocxComment[]>;
   getCommentsForLocation: (location: DocxTextRangeLocation) => DocxComment[];
+  createComment: (
+    text: string,
+    options?: DocxCreateCommentOptions
+  ) => DocxCommentCreationCommandResult;
+  setCommentResolved: (
+    comment: DocxComment,
+    resolved: boolean
+  ) => DocxAnnotationCommandResult;
 }
 
 export interface DocxSectionColumnLayout {
@@ -6599,9 +6704,7 @@ export function precomputePageSegmentForeignWrapExclusions(
         ) {
           return;
         }
-        const band = measuredBandAt(
-          `img:p:${segment.nodeIndex}:${childIndex}`
-        );
+        const band = measuredBandAt(`img:p:${segment.nodeIndex}:${childIndex}`);
         if (!band) {
           return;
         }
@@ -6821,7 +6924,9 @@ export function precomputePageSegmentForeignWrapExclusions(
       ? measuredBandAt(`para:${segment.nodeIndex}`)
       : undefined;
     const flowTopPx =
-      measuredParagraphBand?.topPx ?? flowTopPxBySegmentIndex[segmentIndex] ?? 0;
+      measuredParagraphBand?.topPx ??
+      flowTopPxBySegmentIndex[segmentIndex] ??
+      0;
     const flowBottomPx =
       measuredParagraphBand?.bottomPx ??
       flowTopPx + (flowHeightPxBySegmentIndex[segmentIndex] ?? 0);
@@ -6968,13 +7073,8 @@ function applyWrappedFloatingInteractionPreviewToParagraph(
       }
 
       const widthPx =
-        resizePreview?.widthPx ??
-        child.widthPx ??
-        MIN_PARAGRAPH_LINE_HEIGHT_PX;
-      const heightPx =
-        resizePreview?.heightPx ??
-        child.heightPx ??
-        widthPx;
+        resizePreview?.widthPx ?? child.widthPx ?? MIN_PARAGRAPH_LINE_HEIGHT_PX;
+      const heightPx = resizePreview?.heightPx ?? child.heightPx ?? widthPx;
       const baseGeometry = resolveDualWrappedFloatingImageGeometry(
         child,
         paragraphRenderTextWidthPx,
@@ -7690,14 +7790,33 @@ function buildParagraphPretextLayoutItems(
 
   const items: PretextLayoutItem[] = source.runs
     .filter((run) => run.endOffset > run.startOffset)
-    .map((run) => ({
-      text: run.text,
-      font: resolveMeasureFont(run.style, paragraphBaseFontPx),
-      startOffset: run.startOffset,
-      endOffset: run.endOffset,
-      break: run.kind === "image" || run.kind === "tab" ? "never" : "normal",
-      wordBreak,
-    }));
+    .flatMap<PretextLayoutItem>((run) => {
+      if (run.kind !== "text") {
+        return [
+          {
+            text: run.text,
+            font: resolveMeasureFont(run.style, paragraphBaseFontPx, run.text),
+            startOffset: run.startOffset,
+            endOffset: run.endOffset,
+            break: "never" as const,
+            wordBreak,
+          },
+        ];
+      }
+
+      return resolveTextMeasureFontSegments(
+        run.text,
+        run.style,
+        paragraphBaseFontPx
+      ).map((segment) => ({
+        text: segment.text,
+        font: segment.font,
+        startOffset: run.startOffset + segment.startOffset,
+        endOffset: run.startOffset + segment.endOffset,
+        break: "normal" as const,
+        wordBreak,
+      }));
+    });
   paragraphPretextLayoutItemsBySource.set(source, items);
   return items;
 }
@@ -7729,14 +7848,20 @@ function resolveUniformPretextSourceFont(
       return undefined;
     }
 
-    const runFont = resolveMeasureFont(run.style, paragraphBaseFontPx);
-    if (uniformFont === undefined) {
-      uniformFont = runFont;
-      continue;
-    }
-    if (runFont !== uniformFont) {
-      paragraphPretextUniformFontBySource.set(source, null);
-      return undefined;
+    const runFonts = resolveTextMeasureFontSegments(
+      run.text,
+      run.style,
+      paragraphBaseFontPx
+    ).map((segment) => segment.font);
+    for (const runFont of runFonts) {
+      if (uniformFont === undefined) {
+        uniformFont = runFont;
+        continue;
+      }
+      if (runFont !== uniformFont) {
+        paragraphPretextUniformFontBySource.set(source, null);
+        return undefined;
+      }
     }
   }
 
@@ -7753,17 +7878,21 @@ function buildMeasureSegmentsPretextLayoutItems(
   let nextOffset = 0;
 
   return segments
-    .map((segment) => {
+    .flatMap((segment) => {
       const startOffset = nextOffset;
       nextOffset += segment.text.length;
-      return {
-        text: segment.text,
-        font: resolveMeasureFont(segment.style, paragraphBaseFontPx),
-        startOffset,
-        endOffset: nextOffset,
+      return resolveTextMeasureFontSegments(
+        segment.text,
+        segment.style,
+        paragraphBaseFontPx
+      ).map((fontSegment) => ({
+        text: fontSegment.text,
+        font: fontSegment.font,
+        startOffset: startOffset + fontSegment.startOffset,
+        endOffset: startOffset + fontSegment.endOffset,
         break: "normal" as const,
         wordBreak,
-      };
+      }));
     })
     .filter((item) => item.endOffset > item.startOffset);
 }
@@ -7777,7 +7906,8 @@ function layoutParagraphPretextSource(
 ): PretextVariableWidthLayout | undefined {
   const fallbackFont = resolveMeasureFont(
     firstRunStyle(paragraph),
-    paragraphBaseFontSizePx(paragraph)
+    paragraphBaseFontSizePx(paragraph),
+    source.text
   );
   const wordBreak = pretextWordBreakModeForText(source.text);
   const items = buildParagraphPretextLayoutItems(paragraph, source);
@@ -9930,18 +10060,52 @@ function resolveMeasureFontSizePx(
   return Math.max(8, Math.round(runFontSizePx * verticalAlignScale));
 }
 
-function resolveMeasureFont(
+function resolveMeasureFontForFamily(
   style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
-  paragraphBaseFontPx: number
+  paragraphBaseFontPx: number,
+  fontFamily?: string
 ): string {
   const fontStyle = style?.italic ? "italic" : "normal";
   const fontWeight = style?.bold ? "700" : "400";
   const fontSizePx = resolveMeasureFontSizePx(style, paragraphBaseFontPx);
-  const fontFamily =
-    cssFontFamily(style?.fontFamily) ??
+  const resolvedFontFamily =
+    cssFontFamily(fontFamily ?? style?.fontFamily) ??
     cssFontFamily(DEFAULT_UNSPECIFIED_DOCX_FONT_FAMILY) ??
     '"Times New Roman", serif';
-  return `${fontStyle} normal ${fontWeight} ${fontSizePx}px ${fontFamily}`;
+  return `${fontStyle} normal ${fontWeight} ${fontSizePx}px ${resolvedFontFamily}`;
+}
+
+function resolveMeasureFont(
+  style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
+  paragraphBaseFontPx: number,
+  text?: string
+): string {
+  return resolveMeasureFontForFamily(
+    style,
+    paragraphBaseFontPx,
+    text === undefined
+      ? style?.fontFamily
+      : resolveDocxTextFontFamily(text, style)
+  );
+}
+
+interface TextMeasureFontSegment extends DocxScriptFontSegment {
+  font: string;
+}
+
+function resolveTextMeasureFontSegments(
+  text: string,
+  style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
+  paragraphBaseFontPx: number
+): TextMeasureFontSegment[] {
+  return segmentTextByDocxScriptFont(text, style).map((segment) => ({
+    ...segment,
+    font: resolveMeasureFontForFamily(
+      style,
+      paragraphBaseFontPx,
+      segment.fontFamily
+    ),
+  }));
 }
 
 function measureTextWidthPx(
@@ -9953,11 +10117,17 @@ function measureTextWidthPx(
     return 0;
   }
 
-  const font = resolveMeasureFont(style, paragraphBaseFontPx);
+  const fontSegments = resolveTextMeasureFontSegments(
+    text,
+    style,
+    paragraphBaseFontPx
+  );
   const characterSpacingPx = Number.isFinite(style?.characterSpacingTwips)
     ? (style?.characterSpacingTwips as number) / TWIPS_PER_PIXEL
     : 0;
-  const cacheKey = `${font}\u0000${characterSpacingPx}\u0000${text}`;
+  const cacheKey = `${fontSegments
+    .map((segment) => `${segment.font}\u0001${segment.text}`)
+    .join("\u0002")}\u0000${characterSpacingPx}\u0000${text}`;
   const cached = textWidthByFontAndValue.get(cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -9974,8 +10144,10 @@ function measureTextWidthPx(
       }
       const context = paragraphMeasureCanvasContext;
       if (context) {
-        context.font = font;
-        measuredWidthPx = context.measureText(text).width;
+        measuredWidthPx = fontSegments.reduce((widthPx, segment) => {
+          context.font = segment.font;
+          return widthPx + context.measureText(segment.text).width;
+        }, 0);
       }
     } catch {
       // Keep deterministic fallback width when canvas measurement is unavailable.
@@ -10327,7 +10499,8 @@ function estimateTabLeaderWrappedLineCountForParagraph(
 
   const leftZoneFont = resolveMeasureFont(
     contentSegments.find((segment) => segment.text.trim().length > 0)?.style,
-    paragraphBaseFontPx
+    paragraphBaseFontPx,
+    leftZoneText
   );
   const lineHeightPx = estimateParagraphLineHeightPx(paragraph);
   const pretextLayout = layoutItemsWithPretextAroundExclusions(
@@ -11238,7 +11411,10 @@ function estimateParagraphHeightPx(
     wrappedFloatingImageHeightPx,
     emptyParagraphHeightPx
   );
-  if (excludeWrappedFloatingImageFootprint && paragraph.children.some((c) => c.type === "image")) {
+  if (
+    excludeWrappedFloatingImageFootprint &&
+    paragraph.children.some((c) => c.type === "image")
+  ) {
   }
   const estimatedHeightPx = Math.max(
     1,
@@ -11592,8 +11768,7 @@ export function estimateTableRowHeightsPx(
       numberingDefinitions,
       docGridLinePitchPx
     );
-    const cacheByKey =
-      cachedByKey ?? new Map<number, number[]>();
+    const cacheByKey = cachedByKey ?? new Map<number, number[]>();
     cacheByKey.set(baseCacheKey, baseRowHeights);
     tableEstimatedRowHeightsByNode.set(table, cacheByKey);
   }
@@ -11618,7 +11793,8 @@ export function estimateTableRowHeightsPx(
     const paginationPaddingRatio =
       table.rows.length >= 35
         ? 1.32
-        : table.rows.length >= TABLE_ROW_HEIGHT_PAGINATION_ESTIMATE_PADDING_MIN_ROWS
+        : table.rows.length >=
+          TABLE_ROW_HEIGHT_PAGINATION_ESTIMATE_PADDING_MIN_ROWS
         ? TABLE_ROW_HEIGHT_PAGINATION_ESTIMATE_PADDING_RATIO
         : 1;
     const paddedRowHeightPx =
@@ -15418,9 +15594,7 @@ function resolveWrappedDropAnchorParagraphHost(
     )
   ) as HTMLElement[];
 
-  let best:
-    | { host: HTMLElement; nodeIndex: number; rect: DOMRect }
-    | undefined;
+  let best: { host: HTMLElement; nodeIndex: number; rect: DOMRect } | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const host of hosts) {
     const nodeIndex = Number.parseInt(
@@ -16537,9 +16711,39 @@ function cssFontFamily(fontFamily?: string): string | undefined {
   return `${familyToken}, ${genericFamily}`;
 }
 
+function scriptFontTextContent(
+  text: string,
+  style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
+  keyPrefix: string
+): React.ReactNode {
+  const segments = segmentTextByDocxScriptFont(text, style);
+  if (segments.length <= 1) {
+    return text;
+  }
+
+  return segments.map((segment, index) => (
+    <span
+      key={`${keyPrefix}-script-font-${index}`}
+      style={{ fontFamily: cssFontFamily(segment.fontFamily) }}
+    >
+      {segment.text}
+    </span>
+  ));
+}
+
+function resolveScriptFontCssStyle(
+  baseStyle: React.CSSProperties,
+  text: string,
+  style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined
+): React.CSSProperties {
+  const fontFamily = cssFontFamily(resolveDocxTextFontFamily(text, style));
+  return fontFamily ? { ...baseStyle, fontFamily } : baseStyle;
+}
+
 function runStyleToCss(
   style?: TextRunNode["style"],
-  documentTheme: DocxDocumentTheme = "light"
+  documentTheme: DocxDocumentTheme = "light",
+  text?: string
 ): React.CSSProperties {
   const hasScriptVerticalAlign =
     style?.verticalAlign === "superscript" ||
@@ -16600,7 +16804,11 @@ function runStyleToCss(
       : hasScriptVerticalAlign
       ? `${SCRIPT_FONT_SCALE}em`
       : undefined,
-    fontFamily: cssFontFamily(style?.fontFamily),
+    fontFamily: cssFontFamily(
+      text === undefined
+        ? style?.fontFamily
+        : resolveDocxTextFontFamily(text, style)
+    ),
     letterSpacing: Number.isFinite(style?.characterSpacingTwips)
       ? `${Number(
           ((style?.characterSpacingTwips as number) / 20).toFixed(3)
@@ -16628,9 +16836,10 @@ function runStyleToCss(
 
 function linkStyleToCss(
   style?: TextRunNode["style"],
-  documentTheme: DocxDocumentTheme = "light"
+  documentTheme: DocxDocumentTheme = "light",
+  text?: string
 ): React.CSSProperties {
-  const base = runStyleToCss(style, documentTheme);
+  const base = runStyleToCss(style, documentTheme, text);
   const resolvedTextDecoration =
     typeof base.textDecoration === "string" &&
     base.textDecoration.trim().length > 0
@@ -16690,9 +16899,10 @@ function trackedInlineStyle(
 
 function trackedDeletedStyle(
   documentTheme: DocxDocumentTheme,
-  baseRunStyle?: TextRunNode["style"] | FormFieldRunNode["style"]
+  baseRunStyle?: TextRunNode["style"] | FormFieldRunNode["style"],
+  text?: string
 ): React.CSSProperties {
-  const baseStyle = runStyleToCss(baseRunStyle, documentTheme);
+  const baseStyle = runStyleToCss(baseRunStyle, documentTheme, text);
   return {
     ...baseStyle,
     color: documentTheme === "dark" ? "#fca5a5" : "#b91c1c",
@@ -18219,6 +18429,7 @@ function resolveParagraphTrackedMarkup(
     anonymousChangeCounter += 1;
     const next: ParagraphTrackedInlineChange = {
       id: stableId,
+      revisionId: normalizedRevisionId,
       kind,
       author: normalizedAuthor,
       date: normalizedDate,
@@ -19087,10 +19298,15 @@ function renderParagraphRuns(
           }
           style={trackedDeletedStyle(
             documentTheme,
-            segment.style ?? fallbackStyle
+            segment.style ?? fallbackStyle,
+            segment.text
           )}
         >
-          {segment.text}
+          {scriptFontTextContent(
+            segment.text,
+            segment.style ?? fallbackStyle,
+            `${keySeed}-tracked-del-${segmentIndex}`
+          )}
         </span>
       );
     });
@@ -19180,9 +19396,14 @@ function renderParagraphRuns(
     const shouldControlSoftBreakStretch =
       paragraph.style?.align === "justify" && text.includes("\n");
     if (!shouldControlSoftBreakStretch) {
+      const resolvedStyle = resolveScriptFontCssStyle(
+        style,
+        text,
+        measureStyle
+      );
       target.push(
-        <span key={keySeed} {...spanAttributes} style={style}>
-          {text}
+        <span key={keySeed} {...spanAttributes} style={resolvedStyle}>
+          {scriptFontTextContent(text, measureStyle, keySeed)}
         </span>
       );
       trackTextAdvance(text, measureStyle);
@@ -19197,6 +19418,11 @@ function renderParagraphRuns(
       }
 
       if (segment.length > 0) {
+        const resolvedStyle = resolveScriptFontCssStyle(
+          style,
+          segment,
+          measureStyle
+        );
         target.push(
           <span
             key={`${keySeed}-segment-${segmentIndex}`}
@@ -19204,16 +19430,20 @@ function renderParagraphRuns(
             style={
               isLastSegment
                 ? {
-                    ...style,
+                    ...resolvedStyle,
                     display: "inline-block",
                     maxWidth: "100%",
                     whiteSpace: "pre-wrap",
                     verticalAlign: "baseline",
                   }
-                : style
+                : resolvedStyle
             }
           >
-            {segment}
+            {scriptFontTextContent(
+              segment,
+              measureStyle,
+              `${keySeed}-segment-${segmentIndex}`
+            )}
           </span>
         );
       }
@@ -19362,19 +19592,20 @@ function renderParagraphRuns(
 
   const trackedLinkStyle = (
     style: TextRunNode["style"] | FormFieldRunNode["style"] | undefined,
-    trackedInlineChange: ParagraphTrackedInlineChange | undefined
+    trackedInlineChange: ParagraphTrackedInlineChange | undefined,
+    text: string
   ): React.CSSProperties => {
     if (!isTableOfContentsParagraph(paragraph)) {
       return {
         ...trackedInlineStyle(
-          linkStyleToCss(style, documentTheme),
+          linkStyleToCss(style, documentTheme, text),
           trackedInlineChange
         ),
         ...currentCommentHighlightStyle(),
       };
     }
 
-    const base = runStyleToCss(style, documentTheme);
+    const base = runStyleToCss(style, documentTheme, text);
     return {
       ...trackedInlineStyle(
         {
@@ -19443,9 +19674,9 @@ function renderParagraphRuns(
               event.stopPropagation();
               onInternalLinkClick(linkHref.slice(1));
             }}
-            style={trackedLinkStyle(child.style, trackedInlineChange)}
+            style={trackedLinkStyle(child.style, trackedInlineChange, text)}
           >
-            {text}
+            {scriptFontTextContent(text, child.style, key)}
           </a>
         );
         trackTextAdvance(text, child.style);
@@ -19454,7 +19685,7 @@ function renderParagraphRuns(
 
       const trackedStyle = {
         ...trackedInlineStyle(
-          runStyleToCss(child.style, documentTheme),
+          runStyleToCss(child.style, documentTheme, text),
           trackedInlineChange
         ),
         ...currentCommentHighlightStyle(),
@@ -19474,7 +19705,7 @@ function renderParagraphRuns(
 
       target.push(
         <span key={key} {...annotationAttributes} style={trackedStyle}>
-          {text}
+          {scriptFontTextContent(text, child.style, key)}
         </span>
       );
       trackTextAdvance(text, child.style);
@@ -19832,9 +20063,10 @@ function renderParagraphRuns(
       return;
     }
 
+    const renderedText = textOverride ?? child.text;
     const textStyle = {
       ...trackedInlineStyle(
-        runStyleToCss(child.style, documentTheme),
+        runStyleToCss(child.style, documentTheme, renderedText),
         trackedInlineChange
       ),
       ...currentCommentHighlightStyle(),
@@ -19857,18 +20089,14 @@ function renderParagraphRuns(
             fontSize: "0.75em",
           }}
         >
-          {noteLabel}
+          {scriptFontTextContent(noteLabel, child.style, key)}
         </span>
       );
       trackTextAdvance(noteLabel, child.style);
       return;
     }
 
-    if (
-      (textOverride ?? child.text) === "\t" &&
-      !useTabLeaderLayout &&
-      !useAnchoredTabLayout
-    ) {
+    if (renderedText === "\t" && !useTabLeaderLayout && !useAnchoredTabLayout) {
       target.push(
         <span
           key={key}
@@ -19908,19 +20136,23 @@ function renderParagraphRuns(
             event.stopPropagation();
             onInternalLinkClick(linkHref.slice(1));
           }}
-          style={trackedLinkStyle(child.style, trackedInlineChange)}
+          style={trackedLinkStyle(
+            child.style,
+            trackedInlineChange,
+            renderedText
+          )}
         >
-          {textOverride ?? child.text}
+          {scriptFontTextContent(renderedText, child.style, key)}
         </a>
       );
-      trackTextAdvance(textOverride ?? child.text, child.style);
+      trackTextAdvance(renderedText, child.style);
       return;
     }
 
     appendPlainTextWithSoftBreakControl(
       target,
       key,
-      textOverride ?? child.text,
+      renderedText,
       textStyle,
       child.style,
       annotationAttributes
@@ -22890,6 +23122,34 @@ function cloneTextStyle(
   return style ? { ...style } : undefined;
 }
 
+/**
+ * A toolbar font choice is an explicit whole-run override. Imported OOXML
+ * script slots and theme hints must not remain authoritative on export.
+ */
+export function textStyleWithExplicitFontFamily(
+  style: TextRunNode["style"] | undefined,
+  fontFamily: string
+): NonNullable<TextRunNode["style"]> {
+  const nextStyle: NonNullable<TextRunNode["style"]> = {
+    ...(style ?? {}),
+    fontFamily,
+  };
+  delete nextStyle.fontFamilyAscii;
+  delete nextStyle.fontFamilyHAnsi;
+  delete nextStyle.fontFamilyEastAsia;
+  delete nextStyle.fontFamilyCs;
+  delete nextStyle.fontThemeAscii;
+  delete nextStyle.fontThemeHAnsi;
+  delete nextStyle.fontThemeEastAsia;
+  delete nextStyle.fontThemeCs;
+  delete nextStyle.resolvedFontFamilyAscii;
+  delete nextStyle.resolvedFontFamilyHAnsi;
+  delete nextStyle.resolvedFontFamilyEastAsia;
+  delete nextStyle.resolvedFontFamilyCs;
+  delete nextStyle.fontHint;
+  return nextStyle;
+}
+
 function cloneFormFieldWidget(
   widget?: FormFieldRunNode["widget"]
 ): FormFieldRunNode["widget"] | undefined {
@@ -23739,7 +23999,10 @@ function collectTablePropertyTrackedChanges(
   return entries;
 }
 
-function collectTrackedChangesFromModel(model: DocModel): DocxTrackedChange[] {
+function collectTrackedChangesFromModel(
+  model: DocModel,
+  documentLoadNonce: number
+): DocxTrackedChange[] {
   const trackedChanges: DocxTrackedChange[] = [];
 
   const appendParagraphChanges = (
@@ -23755,7 +24018,11 @@ function collectTrackedChangesFromModel(model: DocModel): DocxTrackedChange[] {
     trackedMarkup.changes.forEach((change, changeIndex) => {
       trackedChanges.push({
         id: `${paragraphLocationKey(location)}:${change.id}:${changeIndex}`,
+        documentLoadNonce,
+        blockId: paragraph.blockId,
+        sourceFingerprint: docNodeContentSignature(paragraph),
         inlineAnchorId: change.id,
+        revisionId: change.revisionId,
         kind: change.kind,
         author: change.author,
         date: change.date,
@@ -23821,6 +24088,9 @@ function collectTrackedChangesFromModel(model: DocModel): DocxTrackedChange[] {
           id: `${paragraphLocationKey(change.location)}:${
             change.stableId
           }:${changeIndex}`,
+          documentLoadNonce,
+          blockId: node.blockId,
+          sourceFingerprint: docNodeContentSignature(node),
           kind: change.kind,
           author: change.author,
           date: change.date,
@@ -23837,9 +24107,7 @@ function collectTrackedChangesFromModel(model: DocModel): DocxTrackedChange[] {
 
 function decodeCommentRangeText(rangeXml: string): string | undefined {
   const texts: string[] = [];
-  for (const match of rangeXml.matchAll(
-    /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi
-  )) {
+  for (const match of rangeXml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi)) {
     texts.push(decodeXmlText(match[1] ?? ""));
   }
   const combined = texts.join("").replace(/\s+/g, " ").trim();
@@ -23863,7 +24131,7 @@ function resolveCommentAnchorText(
     startMatch?.index !== undefined
       ? startMatch.index + startMatch[0].length
       : // Range opened in an earlier paragraph: take from the paragraph start.
-        endMatch?.index !== undefined
+      endMatch?.index !== undefined
       ? 0
       : undefined;
   if (startIndex === undefined) {
@@ -23877,7 +24145,10 @@ function resolveCommentAnchorText(
   return decodeCommentRangeText(sourceXml.slice(startIndex, endIndex));
 }
 
-function collectCommentsFromModel(model: DocModel): DocxComment[] {
+function collectCommentsFromModel(
+  model: DocModel,
+  documentLoadNonce: number
+): DocxComment[] {
   const definitions = model.metadata.comments ?? [];
   if (definitions.length === 0) {
     return [];
@@ -23910,6 +24181,11 @@ function collectCommentsFromModel(model: DocModel): DocxComment[] {
 
       comments.push({
         id: `${paragraphLocationKey(location)}:comment:${commentId}`,
+        documentLoadNonce,
+        blockId: paragraph.blockId,
+        sourceFingerprint: `${docNodeContentSignature(
+          paragraph
+        )}:${docNodeContentSignature(definition)}`,
         commentId,
         author: definition.author,
         initials: definition.initials,
@@ -24080,9 +24356,7 @@ function trackedChangeAccentColor(
   }
 }
 
-function trackedChangeUsesGutterBalloon(
-  change: DocxTrackedChange
-): boolean {
+function trackedChangeUsesGutterBalloon(change: DocxTrackedChange): boolean {
   return change.kind !== "insertion" && change.kind !== "move-to";
 }
 
@@ -24239,9 +24513,7 @@ function findFirstElementWithSpaceSeparatedDataValue(
     candidateElements.push(rootElement);
   }
   candidateElements.push(
-    ...rootElement.querySelectorAll<HTMLElement>(
-      `[${attributeName}]`
-    )
+    ...rootElement.querySelectorAll<HTMLElement>(`[${attributeName}]`)
   );
 
   for (const candidate of candidateElements) {
@@ -25148,6 +25420,31 @@ export function shouldReissueDomSelectionRestore(options: {
   return options.modelChanged;
 }
 
+export function isDomSelectionDestroyed(options: {
+  hasLiveRange: boolean;
+  isCollapsed: boolean;
+  anchorIsElement: boolean;
+  rangeInsideFocusedHost: boolean;
+  rangeInsideViewer: boolean;
+}): boolean {
+  if (!options.hasLiveRange) {
+    return true;
+  }
+
+  // A focused contenteditable only owns one paragraph, but the browser can
+  // maintain a healthy expanded selection across several paragraph hosts.
+  // Treating that range as destroyed restores a stale in-paragraph caret on
+  // mouseup and makes the cross-paragraph selection disappear.
+  if (!options.isCollapsed && options.rangeInsideViewer) {
+    return false;
+  }
+
+  return (
+    !options.rangeInsideFocusedHost ||
+    (options.isCollapsed && options.anchorIsElement)
+  );
+}
+
 // React re-applies `dangerouslySetInnerHTML` whenever the prop OBJECT identity
 // changes, even if the `__html` string is identical — and every reassignment
 // rebuilds the host's child nodes, destroying the live selection (and any
@@ -25435,6 +25732,54 @@ function resolveSelectedParagraphLocation(
   return selectionFallbackParagraphLocation(selection);
 }
 
+function runStyleForEditorSelection(
+  model: DocModel,
+  selection: DocxEditorSelection,
+  activeTextRange?: DocxTextRange
+): TextRunNode["style"] | undefined {
+  const selectedLocation = resolveSelectedParagraphLocation(
+    selection,
+    activeTextRange
+  );
+  const selectedParagraph = getParagraphAtLocation(
+    model,
+    selectedLocation
+  ).paragraph;
+  if (!selectedParagraph) {
+    return undefined;
+  }
+
+  if (!activeTextRange) {
+    return firstRunStyle(selectedParagraph);
+  }
+
+  const normalizedRange = normalizeTextRange(activeTextRange);
+  const isExpandedRange =
+    compareTextRangeBoundaries(normalizedRange.start, normalizedRange.end) < 0;
+  const offset =
+    isExpandedRange &&
+    !sameParagraphLocation(
+      normalizedRange.start.location,
+      normalizedRange.end.location
+    )
+      ? 0
+      : !sameParagraphLocation(normalizedRange.start.location, selectedLocation)
+      ? 0
+      : normalizedRange.start.offset;
+
+  const hasTextRun = selectedParagraph.children.some(
+    (child) => child.type === "text"
+  );
+  if (hasTextRun) {
+    // `undefined` is a valid style for an unformatted run. Do not fall back to
+    // the paragraph's first run, which may describe a different (for example,
+    // already-bold) selection.
+    return firstTextStyleAtOffset(selectedParagraph, offset, false);
+  }
+
+  return firstRunStyle(selectedParagraph);
+}
+
 function normalizeParagraphLocationForModel(
   model: DocModel,
   location: ParagraphLocation
@@ -25620,6 +25965,22 @@ function normalizeEditorCursorStateForModel(
     activeTextRange: undefined,
   };
 }
+
+const reduceDocxEditorState = createTransactionalEditorStateReducer<
+  DocModel,
+  DocxEditorSelection,
+  DocxTextRange,
+  DocxPendingRunStyle
+>({
+  cloneSelection: cloneEditorSelection,
+  cloneTextRange,
+  clonePendingStyle: cloneTextStyle,
+  sameSelection: sameEditorSelection,
+  sameTextRange,
+  samePendingStyle: (a, b) =>
+    JSON.stringify(a ?? null) === JSON.stringify(b ?? null),
+  normalizeCursor: normalizeEditorCursorStateForModel,
+});
 
 function updateParagraphTextAtLocation(
   model: DocModel,
@@ -25955,9 +26316,6 @@ function updateSectionImageFloatingAtLocation(
   return changed ? next : model;
 }
 
-const NO_TRACKED_CHANGES: DocxTrackedChange[] = [];
-const NO_COMMENTS: DocxComment[] = [];
-
 export function useDocxEditor(
   options: UseDocxEditorOptions = {}
 ): DocxEditorController {
@@ -25965,20 +26323,127 @@ export function useDocxEditor(
     cloneDocModelWithBlockIds(options.starterModel ?? defaultStarterModel)
   );
 
-  const [model, setModel] = React.useState<DocModel>(() =>
-    cloneDocModelWithBlockIds(starterTemplateRef.current)
+  const [editorState, dispatchCanonicalEditorState] = React.useReducer(
+    reduceDocxEditorState,
+    starterTemplateRef.current,
+    (starterModel): DocxEditorState => ({
+      model: cloneDocModelWithBlockIds(starterModel),
+      selection: {
+        kind: "paragraph",
+        nodeIndex: 0,
+      },
+      activeTextRange: undefined,
+      pendingRunStyle: undefined,
+      history: {
+        past: [],
+        future: [],
+      },
+    })
+  );
+  const { model, selection, activeTextRange, pendingRunStyle, history } =
+    editorState;
+  const canonicalEditorStateRef = React.useRef<DocxEditorState>(editorState);
+  const applyCanonicalEditorStateAction = React.useCallback(
+    (
+      action: DocxEditorStateAction
+    ): { previous: DocxEditorState; next: DocxEditorState } => {
+      const previous = canonicalEditorStateRef.current;
+      const next = reduceDocxEditorState(previous, action);
+      if (next !== previous) {
+        canonicalEditorStateRef.current = next;
+        dispatchCanonicalEditorState(action);
+      }
+      return { previous, next };
+    },
+    []
+  );
+
+  const setModel = React.useCallback<
+    React.Dispatch<React.SetStateAction<DocModel>>
+  >(
+    (value) => {
+      const currentModel = canonicalEditorStateRef.current.model;
+      const nextModel =
+        typeof value === "function" ? value(currentModel) : value;
+      applyCanonicalEditorStateAction({
+        type: "commit",
+        patch: { model: nextModel },
+        pushHistory: false,
+      });
+    },
+    [applyCanonicalEditorStateAction]
+  );
+  const setSelection = React.useCallback<
+    React.Dispatch<React.SetStateAction<DocxEditorSelection>>
+  >(
+    (value) => {
+      const currentSelection = canonicalEditorStateRef.current.selection;
+      const nextSelection =
+        typeof value === "function" ? value(currentSelection) : value;
+      applyCanonicalEditorStateAction({
+        type: "commit",
+        patch: { selection: nextSelection },
+        pushHistory: false,
+      });
+    },
+    [applyCanonicalEditorStateAction]
+  );
+  const setActiveTextRangeState = React.useCallback<
+    React.Dispatch<React.SetStateAction<DocxTextRange | undefined>>
+  >(
+    (value) => {
+      const currentRange = canonicalEditorStateRef.current.activeTextRange;
+      const nextRange =
+        typeof value === "function" ? value(currentRange) : value;
+      applyCanonicalEditorStateAction({
+        type: "commit",
+        patch: { activeTextRange: nextRange },
+        pushHistory: false,
+      });
+    },
+    [applyCanonicalEditorStateAction]
+  );
+  const setPendingRunStyle = React.useCallback<
+    React.Dispatch<React.SetStateAction<TextRunNode["style"] | undefined>>
+  >(
+    (value) => {
+      const currentStyle = canonicalEditorStateRef.current.pendingRunStyle;
+      const nextStyle =
+        typeof value === "function" ? value(currentStyle) : value;
+      applyCanonicalEditorStateAction({
+        type: "commit",
+        patch: { pendingRunStyle: nextStyle },
+        pushHistory: false,
+      });
+    },
+    [applyCanonicalEditorStateAction]
+  );
+  const setHistory = React.useCallback<
+    React.Dispatch<React.SetStateAction<DocxEditorHistory>>
+  >(
+    (value) => {
+      const currentHistory = canonicalEditorStateRef.current.history;
+      const nextHistory =
+        typeof value === "function" ? value(currentHistory) : value;
+      applyCanonicalEditorStateAction({
+        type: "replace-history",
+        history: nextHistory,
+      });
+    },
+    [applyCanonicalEditorStateAction]
   );
   const [basePackage, setBasePackage] = React.useState<
     OoxmlPackage | undefined
   >();
   const [documentLoadNonce, setDocumentLoadNonce] = React.useState<number>(0);
+  const documentLoadNonceRef = React.useRef(0);
+  const advanceDocumentLoadNonce = React.useCallback((): void => {
+    documentLoadNonceRef.current += 1;
+    setDocumentLoadNonce(documentLoadNonceRef.current);
+  }, []);
   const [fileName, setFileName] = React.useState<string>(
     options.initialFileName ?? "(new document)"
   );
-  const [selection, setSelection] = React.useState<DocxEditorSelection>({
-    kind: "paragraph",
-    nodeIndex: 0,
-  });
   const [selectedFormFieldLocation, setSelectedFormFieldLocation] =
     React.useState<DocxFormFieldLocation | undefined>();
   const [status, setStatus] = React.useState<string>(
@@ -25998,21 +26463,9 @@ export function useDocxEditor(
       currentPage: 1,
       totalPages: 1,
     });
-  const activeImportAbortControllerRef =
-    React.useRef<AbortController | undefined>(undefined);
-  const [history, setHistory] = React.useState<{
-    past: DocxHistorySnapshot[];
-    future: DocxHistorySnapshot[];
-  }>({
-    past: [],
-    future: [],
-  });
-  const [activeTextRange, setActiveTextRangeState] = React.useState<
-    DocxTextRange | undefined
-  >();
-  const [pendingRunStyle, setPendingRunStyle] = React.useState<
-    TextRunNode["style"] | undefined
-  >();
+  const activeImportAbortControllerRef = React.useRef<
+    AbortController | undefined
+  >(undefined);
   const [historyRestoreRequest, setHistoryRestoreRequest] = React.useState<
     DocxHistoryRestoreRequest | undefined
   >();
@@ -26043,11 +26496,18 @@ export function useDocxEditor(
   const loadedEmbeddedFontFacesRef = React.useRef<FontFace[]>([]);
 
   React.useEffect(() => {
+    canonicalEditorStateRef.current = editorState;
+  }, [editorState]);
+
+  React.useEffect(() => {
     modelRef.current = model;
   }, [model]);
 
   React.useEffect(() => {
-    if (typeof process === "undefined" || process.env?.NODE_ENV === "production") {
+    if (
+      typeof process === "undefined" ||
+      process.env?.NODE_ENV === "production"
+    ) {
       return;
     }
 
@@ -26055,7 +26515,9 @@ export function useDocxEditor(
     if (duplicateBlockIds.length > 0) {
       // eslint-disable-next-line no-console
       console.error(
-        `Duplicate doc-model block ids detected (an op copied a node without allocating a fresh id): ${duplicateBlockIds.join(", ")}`
+        `Duplicate doc-model block ids detected (an op copied a node without allocating a fresh id): ${duplicateBlockIds.join(
+          ", "
+        )}`
       );
     }
   }, [model]);
@@ -26339,41 +26801,8 @@ export function useDocxEditor(
   }, [model.nodes, selectedParagraph, selectedParagraphLocation]);
 
   const selectedRunStyleFromSelection = React.useMemo(() => {
-    if (!selectedParagraph) {
-      return undefined;
-    }
-
-    if (!activeTextRange) {
-      return firstRunStyle(selectedParagraph);
-    }
-
-    const normalizedActiveRange = normalizeTextRange(activeTextRange);
-    const isExpandedRange =
-      compareTextRangeBoundaries(
-        normalizedActiveRange.start,
-        normalizedActiveRange.end
-      ) < 0;
-    const offset =
-      isExpandedRange &&
-      !sameParagraphLocation(
-        normalizedActiveRange.start.location,
-        normalizedActiveRange.end.location
-      )
-        ? 0
-        : !sameParagraphLocation(
-            normalizedActiveRange.start.location,
-            selectedParagraphLocation
-          )
-        ? 0
-        : normalizedActiveRange.start.offset;
-
-    return (
-      // Toolbar state should match the style that newly typed text inherits at
-      // a caret boundary, which comes from the following run when available.
-      firstTextStyleAtOffset(selectedParagraph, offset, false) ??
-      firstRunStyle(selectedParagraph)
-    );
-  }, [activeTextRange, selectedParagraph, selectedParagraphLocation]);
+    return runStyleForEditorSelection(model, selection, activeTextRange);
+  }, [activeTextRange, model, selection]);
 
   const selectedRunStyle = React.useMemo(() => {
     const hasExpandedRange = Boolean(
@@ -26444,15 +26873,12 @@ export function useDocxEditor(
     ? paragraphListType(selectedParagraph, model.metadata.numberingDefinitions)
     : undefined;
   const trackedChanges = React.useMemo(
-    () =>
-      showTrackedChanges
-        ? collectTrackedChangesFromModel(model)
-        : NO_TRACKED_CHANGES,
-    [model, showTrackedChanges]
+    () => collectTrackedChangesFromModel(model, documentLoadNonce),
+    [documentLoadNonce, model]
   );
   const comments = React.useMemo(
-    () => (showComments ? collectCommentsFromModel(model) : NO_COMMENTS),
-    [model, showComments]
+    () => collectCommentsFromModel(model, documentLoadNonce),
+    [documentLoadNonce, model]
   );
   const hasUnorderedList = selectedListType === "unordered";
   const hasOrderedList = selectedListType === "ordered";
@@ -26576,10 +27002,13 @@ export function useDocxEditor(
         current: DocxEditorTransactionContext
       ) => DocxEditorTransactionPatch | undefined
     ): boolean => {
-      const currentModel = modelRef.current;
-      const currentSelection = cloneEditorSelection(selectionRef.current);
-      const currentRange = cloneTextRange(activeTextRangeRef.current);
-      const currentPendingRunStyle = cloneTextStyle(pendingRunStyleRef.current);
+      const currentState = canonicalEditorStateRef.current;
+      const currentModel = currentState.model;
+      const currentSelection = cloneEditorSelection(currentState.selection);
+      const currentRange = cloneTextRange(currentState.activeTextRange);
+      const currentPendingRunStyle = cloneTextStyle(
+        currentState.pendingRunStyle
+      );
 
       const patch = resolver({
         model: currentModel,
@@ -26591,7 +27020,6 @@ export function useDocxEditor(
         return false;
       }
 
-      const nextModel = patch.model ?? currentModel;
       const hasExplicitRangePatch = Object.prototype.hasOwnProperty.call(
         patch,
         "activeTextRange"
@@ -26604,73 +27032,59 @@ export function useDocxEditor(
         patch,
         "pendingRunStyle"
       );
-      const requestedSelection = patch.selection ?? currentSelection;
-      const requestedRange = hasExplicitRangePatch
-        ? patch.activeTextRange
-        : currentRange;
-      const normalizedCursorState = normalizeEditorCursorStateForModel(
-        nextModel,
-        requestedSelection,
-        requestedRange
-      );
-      const nextSelection = normalizedCursorState.selection;
-      const nextRange = normalizedCursorState.activeTextRange;
-      const nextPendingRunStyle = hasPendingRunStylePatch
-        ? cloneTextStyle(patch.pendingRunStyle)
-        : currentPendingRunStyle;
+      const canonicalPatch: TransactionalEditorStatePatch<
+        DocModel,
+        DocxEditorSelection,
+        DocxTextRange,
+        DocxPendingRunStyle
+      > = {};
+      if (Object.prototype.hasOwnProperty.call(patch, "model")) {
+        canonicalPatch.model = patch.model ?? currentModel;
+      }
+      if (hasExplicitSelectionPatch) {
+        canonicalPatch.selection = patch.selection ?? currentSelection;
+      }
+      if (hasExplicitRangePatch) {
+        canonicalPatch.activeTextRange = patch.activeTextRange;
+      }
+      if (hasPendingRunStylePatch) {
+        canonicalPatch.pendingRunStyle = patch.pendingRunStyle;
+      }
 
-      const modelChanged = nextModel !== currentModel;
+      const { previous, next } = applyCanonicalEditorStateAction({
+        type: "commit",
+        patch: canonicalPatch,
+        pushHistory: patch.pushHistory,
+      });
       const selectionChanged = !sameEditorSelection(
-        currentSelection,
-        nextSelection
+        previous.selection,
+        next.selection
       );
-      const rangeChanged = !sameTextRange(currentRange, nextRange);
-      const pendingRunStyleChanged =
-        hasPendingRunStylePatch &&
-        JSON.stringify(nextPendingRunStyle ?? null) !==
-          JSON.stringify(currentPendingRunStyle ?? null);
+      const rangeChanged = !sameTextRange(
+        previous.activeTextRange,
+        next.activeTextRange
+      );
+      const canonicalStateChanged = next !== previous;
 
       if (
-        !modelChanged &&
-        !selectionChanged &&
-        !rangeChanged &&
-        !pendingRunStyleChanged &&
+        !canonicalStateChanged &&
         !patch.status &&
         !patch.clearSelectedFormField
       ) {
         return false;
       }
 
-      if (modelChanged && patch.pushHistory !== false) {
-        setHistory((currentHistory) => ({
-          past: [
-            ...currentHistory.past.slice(-99),
-            {
-              model: currentModel,
-              selection: cloneEditorSelection(currentSelection),
-              activeTextRange: cloneTextRange(currentRange),
-            },
-          ],
-          future: [],
-        }));
-      }
-
-      if (modelChanged) {
-        setModel(nextModel);
-      }
-
       if (selectionChanged) {
         suppressSelectionResetRef.current = true;
-        setSelection(cloneEditorSelection(nextSelection));
       }
-
       if (rangeChanged) {
         suppressSelectionResetRef.current = true;
-        setActiveTextRangeState(cloneTextRange(nextRange));
       }
-
-      if (pendingRunStyleChanged) {
-        setPendingRunStyle(nextPendingRunStyle);
+      if (canonicalStateChanged) {
+        modelRef.current = next.model;
+        selectionRef.current = next.selection;
+        activeTextRangeRef.current = next.activeTextRange;
+        pendingRunStyleRef.current = next.pendingRunStyle;
       }
 
       const localSelectionSessionActive =
@@ -26689,8 +27103,8 @@ export function useDocxEditor(
         historyRestoreNonceRef.current = nextNonce;
         setHistoryRestoreRequest({
           nonce: nextNonce,
-          selection: cloneEditorSelection(nextSelection),
-          activeTextRange: cloneTextRange(nextRange),
+          selection: cloneEditorSelection(next.selection),
+          activeTextRange: cloneTextRange(next.activeTextRange),
         });
       }
 
@@ -26704,7 +27118,257 @@ export function useDocxEditor(
 
       return true;
     },
+    [applyCanonicalEditorStateAction]
+  );
+
+  const annotationFailureStatus = React.useCallback(
+    (action: string, reason: DocxAnnotationCommandFailureReason): string => {
+      const detail =
+        reason === "stale"
+          ? "the annotation no longer matches the document"
+          : reason === "unsafe-xml"
+          ? "the source markup is ambiguous"
+          : "this annotation shape is not safely editable";
+      return `${action} failed: ${detail}`;
+    },
     []
+  );
+
+  const runTrackedChangeCommand = React.useCallback(
+    (
+      action: "accept" | "reject",
+      change: DocxTrackedChange
+    ): DocxAnnotationCommandResult => {
+      if (change.documentLoadNonce !== documentLoadNonceRef.current) {
+        const failure = { ok: false, reason: "stale" } as const;
+        setStatus(
+          annotationFailureStatus(
+            action === "accept" ? "Accept change" : "Reject change",
+            failure.reason
+          )
+        );
+        return failure;
+      }
+      if (
+        !change.revisionId ||
+        change.location.kind !== "paragraph" ||
+        (change.kind !== "insertion" && change.kind !== "deletion")
+      ) {
+        const failure = { ok: false, reason: "unsupported" } as const;
+        setStatus(
+          annotationFailureStatus(
+            action === "accept" ? "Accept change" : "Reject change",
+            failure.reason
+          )
+        );
+        return failure;
+      }
+      const revisionId = change.revisionId;
+      const nodeIndex = change.location.nodeIndex;
+
+      let outcome: DocxAnnotationCommandResult = {
+        ok: false,
+        reason: "stale",
+      };
+      dispatchEditorTransaction((current) => {
+        const currentParagraph = current.model.nodes[nodeIndex];
+        if (
+          !currentParagraph ||
+          currentParagraph.type !== "paragraph" ||
+          currentParagraph.blockId !== change.blockId ||
+          docNodeContentSignature(currentParagraph) !== change.sourceFingerprint
+        ) {
+          outcome = { ok: false, reason: "stale" };
+          return {
+            status: annotationFailureStatus(
+              action === "accept" ? "Accept change" : "Reject change",
+              "stale"
+            ),
+            pushHistory: false,
+          };
+        }
+        const mutation =
+          action === "accept"
+            ? acceptParagraphRevision(current.model, {
+                nodeIndex,
+                revisionId,
+                kind: change.kind,
+              })
+            : rejectParagraphRevision(current.model, {
+                nodeIndex,
+                revisionId,
+                kind: change.kind,
+              });
+        if (!mutation.ok) {
+          outcome = mutation;
+          return {
+            status: annotationFailureStatus(
+              action === "accept" ? "Accept change" : "Reject change",
+              mutation.reason
+            ),
+            pushHistory: false,
+          };
+        }
+
+        outcome = { ok: true };
+        return {
+          model: mutation.model,
+          status: action === "accept" ? "Accepted change" : "Rejected change",
+          clearSelectedFormField: true,
+        };
+      });
+      return outcome;
+    },
+    [annotationFailureStatus, dispatchEditorTransaction]
+  );
+
+  const acceptTrackedChange = React.useCallback(
+    (change: DocxTrackedChange): DocxAnnotationCommandResult =>
+      runTrackedChangeCommand("accept", change),
+    [runTrackedChangeCommand]
+  );
+
+  const rejectTrackedChange = React.useCallback(
+    (change: DocxTrackedChange): DocxAnnotationCommandResult =>
+      runTrackedChangeCommand("reject", change),
+    [runTrackedChangeCommand]
+  );
+
+  const createComment = React.useCallback(
+    (
+      text: string,
+      commentOptions: DocxCreateCommentOptions = {}
+    ): DocxCommentCreationCommandResult => {
+      let outcome: DocxCommentCreationCommandResult = {
+        ok: false,
+        reason: "unsupported",
+      };
+      dispatchEditorTransaction((current) => {
+        const range = current.activeTextRange
+          ? normalizeTextRange(current.activeTextRange)
+          : undefined;
+        if (
+          !range ||
+          range.start.location.kind !== "paragraph" ||
+          range.end.location.kind !== "paragraph" ||
+          range.start.location.nodeIndex !== range.end.location.nodeIndex ||
+          range.end.offset <= range.start.offset
+        ) {
+          outcome = { ok: false, reason: "unsupported" };
+          return {
+            status: annotationFailureStatus("Add comment", outcome.reason),
+            pushHistory: false,
+          };
+        }
+
+        const mutation = createParagraphComment(current.model, {
+          nodeIndex: range.start.location.nodeIndex,
+          startOffset: range.start.offset,
+          endOffset: range.end.offset,
+          text,
+          author: commentOptions.author,
+          initials: commentOptions.initials,
+          date: commentOptions.date,
+        });
+        if (!mutation.ok) {
+          outcome = mutation;
+          return {
+            status: annotationFailureStatus("Add comment", mutation.reason),
+            pushHistory: false,
+          };
+        }
+
+        outcome = { ok: true, commentId: mutation.commentId };
+        return {
+          model: mutation.model,
+          status: "Added comment",
+          clearSelectedFormField: true,
+        };
+      });
+      if (outcome.ok) {
+        setShowCommentsState(true);
+      }
+      return outcome;
+    },
+    [annotationFailureStatus, dispatchEditorTransaction]
+  );
+
+  const setCommentResolved = React.useCallback(
+    (comment: DocxComment, resolved: boolean): DocxAnnotationCommandResult => {
+      if (comment.documentLoadNonce !== documentLoadNonceRef.current) {
+        const failure = { ok: false, reason: "stale" } as const;
+        setStatus(
+          annotationFailureStatus(
+            resolved ? "Resolve comment" : "Reopen comment",
+            failure.reason
+          )
+        );
+        return failure;
+      }
+      let outcome: DocxAnnotationCommandResult = {
+        ok: false,
+        reason: "stale",
+      };
+      dispatchEditorTransaction((current) => {
+        const currentParagraph = getParagraphAtLocation(
+          current.model,
+          comment.location
+        ).paragraph;
+        const currentDefinition = current.model.metadata.comments?.find(
+          (definition) => definition.id === comment.commentId
+        );
+        if (
+          !currentParagraph ||
+          !currentDefinition ||
+          currentParagraph.blockId !== comment.blockId ||
+          `${docNodeContentSignature(
+            currentParagraph
+          )}:${docNodeContentSignature(currentDefinition)}` !==
+            comment.sourceFingerprint
+        ) {
+          outcome = { ok: false, reason: "stale" };
+          return {
+            status: annotationFailureStatus(
+              resolved ? "Resolve comment" : "Reopen comment",
+              "stale"
+            ),
+            pushHistory: false,
+          };
+        }
+        if (currentDefinition.resolved === resolved) {
+          outcome = { ok: true };
+          return {
+            status: resolved
+              ? "Comment is already resolved"
+              : "Comment is already open",
+            pushHistory: false,
+          };
+        }
+        const mutation = setCommentResolvedInModel(
+          current.model,
+          comment.commentId,
+          resolved
+        );
+        if (!mutation.ok) {
+          outcome = mutation;
+          return {
+            status: annotationFailureStatus(
+              resolved ? "Resolve comment" : "Reopen comment",
+              mutation.reason
+            ),
+            pushHistory: false,
+          };
+        }
+
+        outcome = { ok: true };
+        return {
+          model: mutation.model,
+          status: resolved ? "Resolved comment" : "Reopened comment",
+        };
+      });
+      return outcome;
+    },
+    [annotationFailureStatus, dispatchEditorTransaction]
   );
 
   const applyModelChange = React.useCallback(
@@ -26729,7 +27393,7 @@ export function useDocxEditor(
     (fileName: string, error: Error): void => {
       unloadEmbeddedFonts();
       setModel(createBlankDocumentModel());
-      setDocumentLoadNonce((current) => current + 1);
+      advanceDocumentLoadNonce();
       setHistory({ past: [], future: [] });
       setHistoryRestoreRequest(undefined);
       setBasePackage(undefined);
@@ -26741,7 +27405,7 @@ export function useDocxEditor(
       setImportError(error);
       setStatus(`Failed to load file: ${error.message}`);
     },
-    [unloadEmbeddedFonts]
+    [advanceDocumentLoadNonce, unloadEmbeddedFonts]
   );
 
   const importDocxFile = React.useCallback(
@@ -26808,7 +27472,7 @@ export function useDocxEditor(
 
         markDocxImportPerformance(stateStartMark);
         setModel(nextModel);
-        setDocumentLoadNonce((current) => current + 1);
+        advanceDocumentLoadNonce();
         setHistory({ past: [], future: [] });
         setHistoryRestoreRequest(undefined);
         setBasePackage(pkg);
@@ -26825,7 +27489,11 @@ export function useDocxEditor(
           stateStartMark,
           stateEndMark
         );
-        measureDocxImportPerformance(`${traceName}:total`, startMark, stateEndMark);
+        measureDocxImportPerformance(
+          `${traceName}:total`,
+          startMark,
+          stateEndMark
+        );
       } catch (error) {
         if (
           error instanceof Error &&
@@ -26844,7 +27512,11 @@ export function useDocxEditor(
         }
       }
     },
-    [loadEmbeddedFontsFromPackage, replaceDocumentWithImportError]
+    [
+      advanceDocumentLoadNonce,
+      loadEmbeddedFontsFromPackage,
+      replaceDocumentWithImportError,
+    ]
   );
 
   const newDocument = React.useCallback((): void => {
@@ -26852,7 +27524,7 @@ export function useDocxEditor(
     activeImportAbortControllerRef.current = undefined;
     unloadEmbeddedFonts();
     setModel(cloneDocModelWithBlockIds(starterTemplateRef.current));
-    setDocumentLoadNonce((current) => current + 1);
+    advanceDocumentLoadNonce();
     setBasePackage(undefined);
     setFileName("(new document)");
     setSelection({ kind: "paragraph", nodeIndex: 0 });
@@ -26863,7 +27535,7 @@ export function useDocxEditor(
     setHistoryRestoreRequest(undefined);
     setImportError(undefined);
     setStatus("Created new document");
-  }, [unloadEmbeddedFonts]);
+  }, [advanceDocumentLoadNonce, unloadEmbeddedFonts]);
 
   const exportDocx = React.useCallback(async (): Promise<void> => {
     const sourceModel = modelRef.current;
@@ -26898,86 +27570,55 @@ export function useDocxEditor(
 
   const undo = React.useCallback((): void => {
     textCommitBurstRef.current = undefined;
-    setHistory((currentHistory) => {
-      const previousSnapshot =
-        currentHistory.past[currentHistory.past.length - 1];
-      const previous = previousSnapshot?.model;
-      if (!previous) {
-        setStatus("Nothing to undo");
-        return currentHistory;
-      }
-
-      const currentSnapshot: DocxHistorySnapshot = {
-        model: modelRef.current,
-        selection: cloneEditorSelection(selectionRef.current),
-        activeTextRange: cloneTextRange(activeTextRangeRef.current),
-      };
-      const restoredSelection = cloneEditorSelection(
-        previousSnapshot.selection
-      );
-      const restoredTextRange = cloneTextRange(
-        previousSnapshot.activeTextRange
-      );
-      suppressSelectionResetRef.current = true;
-      setModel(previous);
-      setSelection(restoredSelection);
-      setActiveTextRangeState(restoredTextRange);
-      setSelectedFormFieldLocation(undefined);
-      setPendingRunStyle(undefined);
-      const nextNonce = historyRestoreNonceRef.current + 1;
-      historyRestoreNonceRef.current = nextNonce;
-      setHistoryRestoreRequest({
-        nonce: nextNonce,
-        selection: restoredSelection,
-        activeTextRange: restoredTextRange,
-      });
-      setStatus("Undo");
-
-      return {
-        past: currentHistory.past.slice(0, -1),
-        future: [currentSnapshot, ...currentHistory.future].slice(0, 100),
-      };
+    const { previous, next } = applyCanonicalEditorStateAction({
+      type: "undo",
     });
-  }, []);
+    if (next === previous) {
+      setStatus("Nothing to undo");
+      return;
+    }
+
+    suppressSelectionResetRef.current = true;
+    modelRef.current = next.model;
+    selectionRef.current = next.selection;
+    activeTextRangeRef.current = next.activeTextRange;
+    pendingRunStyleRef.current = next.pendingRunStyle;
+    setSelectedFormFieldLocation(undefined);
+    const nextNonce = historyRestoreNonceRef.current + 1;
+    historyRestoreNonceRef.current = nextNonce;
+    setHistoryRestoreRequest({
+      nonce: nextNonce,
+      selection: cloneEditorSelection(next.selection),
+      activeTextRange: cloneTextRange(next.activeTextRange),
+    });
+    setStatus("Undo");
+  }, [applyCanonicalEditorStateAction]);
 
   const redo = React.useCallback((): void => {
     textCommitBurstRef.current = undefined;
-    setHistory((currentHistory) => {
-      const nextSnapshot = currentHistory.future[0];
-      const next = nextSnapshot?.model;
-      if (!next) {
-        setStatus("Nothing to redo");
-        return currentHistory;
-      }
-
-      const currentSnapshot: DocxHistorySnapshot = {
-        model: modelRef.current,
-        selection: cloneEditorSelection(selectionRef.current),
-        activeTextRange: cloneTextRange(activeTextRangeRef.current),
-      };
-      const restoredSelection = cloneEditorSelection(nextSnapshot.selection);
-      const restoredTextRange = cloneTextRange(nextSnapshot.activeTextRange);
-      suppressSelectionResetRef.current = true;
-      setModel(next);
-      setSelection(restoredSelection);
-      setActiveTextRangeState(restoredTextRange);
-      setSelectedFormFieldLocation(undefined);
-      setPendingRunStyle(undefined);
-      const nextNonce = historyRestoreNonceRef.current + 1;
-      historyRestoreNonceRef.current = nextNonce;
-      setHistoryRestoreRequest({
-        nonce: nextNonce,
-        selection: restoredSelection,
-        activeTextRange: restoredTextRange,
-      });
-      setStatus("Redo");
-
-      return {
-        past: [...currentHistory.past, currentSnapshot].slice(-100),
-        future: currentHistory.future.slice(1),
-      };
+    const { previous, next } = applyCanonicalEditorStateAction({
+      type: "redo",
     });
-  }, []);
+    if (next === previous) {
+      setStatus("Nothing to redo");
+      return;
+    }
+
+    suppressSelectionResetRef.current = true;
+    modelRef.current = next.model;
+    selectionRef.current = next.selection;
+    activeTextRangeRef.current = next.activeTextRange;
+    pendingRunStyleRef.current = next.pendingRunStyle;
+    setSelectedFormFieldLocation(undefined);
+    const nextNonce = historyRestoreNonceRef.current + 1;
+    historyRestoreNonceRef.current = nextNonce;
+    setHistoryRestoreRequest({
+      nonce: nextNonce,
+      selection: cloneEditorSelection(next.selection),
+      activeTextRange: cloneTextRange(next.activeTextRange),
+    });
+    setStatus("Redo");
+  }, [applyCanonicalEditorStateAction]);
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -27079,6 +27720,7 @@ export function useDocxEditor(
     (range?: DocxTextRange): void => {
       const currentRange = cloneTextRange(activeTextRangeRef.current);
       if (!range) {
+        setHistoryRestoreRequest(undefined);
         if (!currentRange) {
           return;
         }
@@ -27102,10 +27744,18 @@ export function useDocxEditor(
         },
       });
 
+      // Observing a live DOM range supersedes any pending restore even when a
+      // selectionchange event already copied the same coordinates into the
+      // editor ref before mouseup.
+      setHistoryRestoreRequest(undefined);
       if (sameTextRange(currentRange, normalized)) {
         return;
       }
 
+      // A newly committed user/DOM range supersedes any selection restore
+      // queued by the previous toolbar or history command. Leaving that
+      // request mounted lets it restore the old range between the next
+      // toolbar pointerdown and click, so the command targets the prior text.
       const nextRange = cloneTextRange(normalized);
       activeTextRangeRef.current = nextRange;
       lastInViewerActiveTextRangeRef.current = cloneTextRange(nextRange);
@@ -27129,14 +27779,15 @@ export function useDocxEditor(
         currentStyle: TextRunNode["style"] | undefined
       ) => TextRunNode["style"] | undefined
     ): void => {
+      const currentState = canonicalEditorStateRef.current;
       const textRangeSnapshot = cloneTextRange(
-        activeTextRangeRef.current ?? lastInViewerActiveTextRangeRef.current
+        currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
       );
       const selectionSnapshot = textRangeSnapshot
         ? selectionFromTextRangeLocation(
             normalizeTextRange(textRangeSnapshot).start.location
           )
-        : cloneEditorSelection(selectionRef.current);
+        : cloneEditorSelection(currentState.selection);
       const hasExpandedRange = Boolean(
         textRangeSnapshot &&
           compareTextRangeBoundaries(
@@ -27349,10 +28000,9 @@ export function useDocxEditor(
 
   const setFontFamily = React.useCallback(
     (fontFamily: string): void => {
-      applySelectedStyleChange((style) => ({
-        ...(style ?? {}),
-        fontFamily,
-      }));
+      applySelectedStyleChange((style) =>
+        textStyleWithExplicitFontFamily(style, fontFamily)
+      );
     },
     [applySelectedStyleChange]
   );
@@ -27367,37 +28017,65 @@ export function useDocxEditor(
     [applySelectedStyleChange]
   );
 
+  const currentSelectedRunStyleSnapshot = React.useCallback(():
+    | TextRunNode["style"]
+    | undefined => {
+    const currentState = canonicalEditorStateRef.current;
+    const range = cloneTextRange(
+      currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+    );
+    const styleFromSelection = runStyleForEditorSelection(
+      currentState.model,
+      currentState.selection,
+      range
+    );
+    const hasExpandedRange = Boolean(
+      range && compareTextRangeBoundaries(range.start, range.end) < 0
+    );
+    const currentPendingStyle = currentState.pendingRunStyle;
+    if (hasExpandedRange || !currentPendingStyle) {
+      return styleFromSelection;
+    }
+
+    return {
+      ...(styleFromSelection ?? {}),
+      ...currentPendingStyle,
+    };
+  }, []);
+
   const toggleBold = React.useCallback((): void => {
-    const nextBold = !Boolean(selectedRunStyle?.bold);
+    const nextBold = !Boolean(currentSelectedRunStyleSnapshot()?.bold);
     applySelectedStyleChange((style) => ({
       ...(style ?? {}),
       bold: nextBold,
     }));
-  }, [applySelectedStyleChange, selectedRunStyle?.bold]);
+  }, [applySelectedStyleChange, currentSelectedRunStyleSnapshot]);
 
   const toggleItalic = React.useCallback((): void => {
-    const nextItalic = !Boolean(selectedRunStyle?.italic);
+    const nextItalic = !Boolean(currentSelectedRunStyleSnapshot()?.italic);
     applySelectedStyleChange((style) => ({
       ...(style ?? {}),
       italic: nextItalic,
     }));
-  }, [applySelectedStyleChange, selectedRunStyle?.italic]);
+  }, [applySelectedStyleChange, currentSelectedRunStyleSnapshot]);
 
   const toggleUnderline = React.useCallback((): void => {
-    const nextUnderline = !Boolean(selectedRunStyle?.underline);
+    const nextUnderline = !Boolean(
+      currentSelectedRunStyleSnapshot()?.underline
+    );
     applySelectedStyleChange((style) => ({
       ...(style ?? {}),
       underline: nextUnderline,
     }));
-  }, [applySelectedStyleChange, selectedRunStyle?.underline]);
+  }, [applySelectedStyleChange, currentSelectedRunStyleSnapshot]);
 
   const toggleStrike = React.useCallback((): void => {
-    const nextStrike = !Boolean(selectedRunStyle?.strike);
+    const nextStrike = !Boolean(currentSelectedRunStyleSnapshot()?.strike);
     applySelectedStyleChange((style) => ({
       ...(style ?? {}),
       strike: nextStrike,
     }));
-  }, [applySelectedStyleChange, selectedRunStyle?.strike]);
+  }, [applySelectedStyleChange, currentSelectedRunStyleSnapshot]);
 
   const toggleSuperscript = React.useCallback((): void => {
     const nextVerticalAlign =
@@ -29184,22 +29862,27 @@ export function useDocxEditor(
 
   const appendParagraph = React.useCallback(
     (text = ""): number => {
-      const insertedIndex = modelRef.current.nodes.length;
-
-      applyModelChange((current) => {
-        const next = cloneDocModel(current);
+      let insertedIndex = 0;
+      dispatchEditorTransaction((current) => {
+        insertedIndex = current.model.nodes.length;
+        const next = cloneDocModel(current.model);
         next.nodes.push({
           type: "paragraph",
           blockId: allocateBlockId(),
           children: [{ type: "text", text }],
         });
-        return next;
-      }, "Inserted paragraph");
-
-      setSelection({ kind: "paragraph", nodeIndex: insertedIndex });
+        return {
+          model: next,
+          selection: { kind: "paragraph", nodeIndex: insertedIndex },
+          activeTextRange: undefined,
+          pendingRunStyle: undefined,
+          status: "Inserted paragraph",
+          clearSelectedFormField: true,
+        };
+      });
       return insertedIndex;
     },
-    [applyModelChange]
+    [dispatchEditorTransaction]
   );
 
   const resizeImage = React.useCallback(
@@ -30772,6 +31455,10 @@ export function useDocxEditor(
     syncPaginationInfo,
     toggleShowTrackedChanges,
     toggleShowComments,
+    acceptTrackedChange,
+    rejectTrackedChange,
+    createComment,
+    setCommentResolved,
     importDocxFile,
     newDocument,
     exportDocx,
@@ -31086,7 +31773,9 @@ const DOCX_DIRECT_THUMBNAIL_MAX_TEXT_CHARS = 900;
 const DOCX_DIRECT_THUMBNAIL_MAX_TABLE_CELLS = 220;
 const DOCX_DIRECT_THUMBNAIL_MAX_CELL_TEXT_CHARS = 120;
 
-function docxThumbnailCssNumber(value: React.CSSProperties[keyof React.CSSProperties]): number {
+function docxThumbnailCssNumber(
+  value: React.CSSProperties[keyof React.CSSProperties]
+): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
@@ -31127,7 +31816,10 @@ function appendDocxThumbnailTextRun(
   run: DocxPageThumbnailTextRunSnapshot,
   remaining: { chars: number }
 ): void {
-  if (remaining.chars <= 0 || runs.length >= DOCX_DIRECT_THUMBNAIL_MAX_TEXT_RUNS) {
+  if (
+    remaining.chars <= 0 ||
+    runs.length >= DOCX_DIRECT_THUMBNAIL_MAX_TEXT_RUNS
+  ) {
     return;
   }
 
@@ -31193,7 +31885,10 @@ function docxThumbnailTextRunsFromParagraph(
         bold: style?.bold ?? fallbackHeadingStyle?.bold,
         italic: style?.italic ?? fallbackHeadingStyle?.italic,
         color: normalizeDocxThumbnailColor(
-          themedRunColor(style?.color ?? fallbackHeadingStyle?.color, documentTheme)
+          themedRunColor(
+            style?.color ?? fallbackHeadingStyle?.color,
+            documentTheme
+          )
         ),
         backgroundColor: normalizeDocxThumbnailColor(
           style?.backgroundColor ?? resolveHighlightColor(style?.highlight)
@@ -31271,7 +31966,10 @@ function buildDocxThumbnailParagraphElements(params: {
       ? 0
       : Math.max(0, docxThumbnailCssNumber(blockStyle.marginBottom));
   const marginLeftPx = docxThumbnailCssNumber(blockStyle.marginLeft);
-  const marginRightPx = Math.max(0, docxThumbnailCssNumber(blockStyle.marginRight));
+  const marginRightPx = Math.max(
+    0,
+    docxThumbnailCssNumber(blockStyle.marginRight)
+  );
   const xPx = contentLeftPx + marginLeftPx;
   const widthPx = Math.max(8, contentWidthPx - marginLeftPx - marginRightPx);
   const bodyYPx = yPx + marginTopPx;
@@ -31303,7 +32001,10 @@ function buildDocxThumbnailParagraphElements(params: {
     );
     imageRuns.slice(0, 4).forEach((imageRun) => {
       const imageWidthPx = Math.max(18, imageRun.widthPx ?? widthPx * 0.5);
-      const imageHeightPx = Math.max(18, imageRun.heightPx ?? bodyHeightPx * 0.5);
+      const imageHeightPx = Math.max(
+        18,
+        imageRun.heightPx ?? bodyHeightPx * 0.5
+      );
       const scale = Math.min(
         1,
         (widthPx - 4) / imageWidthPx,
@@ -31368,11 +32069,16 @@ function buildDocxThumbnailTableElement(params: {
   const columnCount = tableColumnCount(table);
   const tableIndentPx = twipsToSignedPixels(table.style?.indentTwips) ?? 0;
   const tableWidthPx = twipsToPixels(table.style?.widthTwips);
-  const definedWidthsTwips = columnWidthsFromTableDefinition(table, columnCount);
+  const definedWidthsTwips = columnWidthsFromTableDefinition(
+    table,
+    columnCount
+  );
   const rawTableColumnWidthsPx =
     definedWidthsTwips && definedWidthsTwips.length > 0
       ? normalizeColumnWidthsPx(
-          definedWidthsTwips.map((widthTwips) => twipsToPixels(widthTwips) ?? 0),
+          definedWidthsTwips.map(
+            (widthTwips) => twipsToPixels(widthTwips) ?? 0
+          ),
           columnCount,
           tableWidthPx,
           1
@@ -31420,7 +32126,8 @@ function buildDocxThumbnailTableElement(params: {
 
   for (
     let rowIndex = startRowIndex;
-    rowIndex < endRowIndex && cells.length < DOCX_DIRECT_THUMBNAIL_MAX_TABLE_CELLS;
+    rowIndex < endRowIndex &&
+    cells.length < DOCX_DIRECT_THUMBNAIL_MAX_TABLE_CELLS;
     rowIndex += 1
   ) {
     const row = table.rows[rowIndex];
@@ -31437,7 +32144,9 @@ function buildDocxThumbnailTableElement(params: {
         return;
       }
       const span =
-        cell.style?.gridSpan && cell.style.gridSpan > 1 ? cell.style.gridSpan : 1;
+        cell.style?.gridSpan && cell.style.gridSpan > 1
+          ? cell.style.gridSpan
+          : 1;
       const xPx = columnWidthsPx
         .slice(0, columnCursor)
         .reduce((sum, widthPx) => sum + widthPx, 0);
@@ -31486,7 +32195,9 @@ function docxThumbnailNodeRequiresDomRaster(
 
   return node.rows.some((row) =>
     row.cells.some((cell) =>
-      cell.nodes.some((cellNode) => docxThumbnailNodeRequiresDomRaster(cellNode))
+      cell.nodes.some((cellNode) =>
+        docxThumbnailNodeRequiresDomRaster(cellNode)
+      )
     )
   );
 }
@@ -32151,12 +32862,14 @@ export function useDocxPageThumbnails(
               new DocxDetachedThumbnailSurfaceRenderer();
           }
           livePageElement =
-            await detachedThumbnailSurfaceRendererRef.current.renderPageSurface({
-              editor,
-              registry: pageSurfaceRegistry,
-              pageIndex,
-              renderKey: detachedRenderKey,
-            });
+            await detachedThumbnailSurfaceRendererRef.current.renderPageSurface(
+              {
+                editor,
+                registry: pageSurfaceRegistry,
+                pageIndex,
+                renderKey: detachedRenderKey,
+              }
+            );
         }
         if (!livePageElement || !livePageElement.isConnected) {
           return undefined;
@@ -32345,37 +33058,36 @@ export function useDocxPageThumbnails(
     },
     [renderPageThumbnailToCanvas, thumbnailRenderPriorityForPage]
   );
-  const requestPrefetchThumbnailRenders = React.useCallback(async (): Promise<
-    void
-  > => {
-    if (options.disabled) {
-      queuedPrefetchThumbnailKeysRef.current.forEach((queueKey) => {
-        thumbnailRasterQueueRef.current?.cancel(queueKey);
-      });
-      queuedPrefetchThumbnailKeysRef.current.clear();
-      return;
-    }
-
-    const requestedPrefetchKeys = new Set(
-      prefetchThumbnailPageIndexes.map((pageIndex) =>
-        docxThumbnailPrefetchQueueKey(pageIndex)
-      )
-    );
-    queuedPrefetchThumbnailKeysRef.current.forEach((queueKey) => {
-      if (!requestedPrefetchKeys.has(queueKey)) {
-        thumbnailRasterQueueRef.current?.cancel(queueKey);
-        queuedPrefetchThumbnailKeysRef.current.delete(queueKey);
+  const requestPrefetchThumbnailRenders =
+    React.useCallback(async (): Promise<void> => {
+      if (options.disabled) {
+        queuedPrefetchThumbnailKeysRef.current.forEach((queueKey) => {
+          thumbnailRasterQueueRef.current?.cancel(queueKey);
+        });
+        queuedPrefetchThumbnailKeysRef.current.clear();
+        return;
       }
-    });
-    const tasks = prefetchThumbnailPageIndexes.map((pageIndex) =>
-      prefetchPageThumbnailSurface(pageIndex)
-    );
-    await Promise.all(tasks);
-  }, [
-    options.disabled,
-    prefetchPageThumbnailSurface,
-    prefetchThumbnailPageIndexes,
-  ]);
+
+      const requestedPrefetchKeys = new Set(
+        prefetchThumbnailPageIndexes.map((pageIndex) =>
+          docxThumbnailPrefetchQueueKey(pageIndex)
+        )
+      );
+      queuedPrefetchThumbnailKeysRef.current.forEach((queueKey) => {
+        if (!requestedPrefetchKeys.has(queueKey)) {
+          thumbnailRasterQueueRef.current?.cancel(queueKey);
+          queuedPrefetchThumbnailKeysRef.current.delete(queueKey);
+        }
+      });
+      const tasks = prefetchThumbnailPageIndexes.map((pageIndex) =>
+        prefetchPageThumbnailSurface(pageIndex)
+      );
+      await Promise.all(tasks);
+    }, [
+      options.disabled,
+      prefetchPageThumbnailSurface,
+      prefetchThumbnailPageIndexes,
+    ]);
 
   React.useEffect(() => {
     void requestPrefetchThumbnailRenders();
@@ -32803,6 +33515,8 @@ export function useDocxTrackChanges(
     | "showTrackedChanges"
     | "setShowTrackedChanges"
     | "toggleShowTrackedChanges"
+    | "acceptTrackedChange"
+    | "rejectTrackedChange"
   >
 ): UseDocxTrackChangesResult {
   const changesByLocation = React.useMemo(() => {
@@ -32831,12 +33545,16 @@ export function useDocxTrackChanges(
       toggleShowTrackedChanges: editor.toggleShowTrackedChanges,
       changesByLocation,
       getChangesForLocation,
+      acceptChange: editor.acceptTrackedChange,
+      rejectChange: editor.rejectTrackedChange,
     }),
     [
       editor.trackedChanges,
       editor.showTrackedChanges,
       editor.setShowTrackedChanges,
       editor.toggleShowTrackedChanges,
+      editor.acceptTrackedChange,
+      editor.rejectTrackedChange,
       changesByLocation,
       getChangesForLocation,
     ]
@@ -32851,7 +33569,12 @@ export function useDocxTrackChanges(
 export function useDocxComments(
   editor: Pick<
     DocxEditorController,
-    "comments" | "showComments" | "setShowComments" | "toggleShowComments"
+    | "comments"
+    | "showComments"
+    | "setShowComments"
+    | "toggleShowComments"
+    | "createComment"
+    | "setCommentResolved"
   >
 ): UseDocxCommentsResult {
   const commentsByLocation = React.useMemo(() => {
@@ -32880,12 +33603,16 @@ export function useDocxComments(
       toggleShowComments: editor.toggleShowComments,
       commentsByLocation,
       getCommentsForLocation,
+      createComment: editor.createComment,
+      setCommentResolved: editor.setCommentResolved,
     }),
     [
       editor.comments,
       editor.showComments,
       editor.setShowComments,
       editor.toggleShowComments,
+      editor.createComment,
+      editor.setCommentResolved,
       commentsByLocation,
       getCommentsForLocation,
     ]
@@ -34320,6 +35047,17 @@ export function DocxEditorViewer({
     start: number;
     end: number;
   } | null>(null);
+  // Native selectionchange events are asynchronous. Keep the most recent
+  // programmatic range in a synchronous guard long enough for React to commit
+  // and for the replacement DOM to receive that range; otherwise a delayed
+  // event can write the pre-command selection back into editor state.
+  const commandSelectionGuardRef = React.useRef<
+    | {
+        range: DocxTextRange;
+        expiresAt: number;
+      }
+    | undefined
+  >(undefined);
   // Continuation state for beforeinput-driven hosts: the paragraph text and
   // caret produced by the most recent intent commit. When the next beforeinput
   // arrives before React has re-rendered the host (fast typing), the DOM still
@@ -35299,13 +36037,13 @@ export function DocxEditorViewer({
       (measuredPageContentHeightByIndex?.length ?? 0) === 0
         ? undefined
         : !editor.canUndo && !editor.canRedo
-          ? measuredPageContentHeightByIndex
-          : resolveMeasuredPageContentHeightsPxForEditedModel(
-              editor.model.nodes,
-              measuredPageContentHeightByIndex,
-              measuredPageContentValidationByIndex,
-              paginationMeasurementContextSignature
-            );
+        ? measuredPageContentHeightByIndex
+        : resolveMeasuredPageContentHeightsPxForEditedModel(
+            editor.model.nodes,
+            measuredPageContentHeightByIndex,
+            measuredPageContentValidationByIndex,
+            paginationMeasurementContextSignature
+          );
     const canUseMeasuredPageContentHeights =
       !disableMeasuredImportPagination &&
       !floatingMovePreview &&
@@ -35317,7 +36055,9 @@ export function DocxEditorViewer({
     // pagination pass per evaluation.
     const buildEstimatedPagesForInputs = createEstimatedPagesBuildMemo(
       (
-        measuredTableRowHeightsByNodeIndex: Record<number, number[]> | undefined,
+        measuredTableRowHeightsByNodeIndex:
+          | Record<number, number[]>
+          | undefined,
         measuredPageContentHeightsPx: number[] | undefined,
         strictLastRenderedParagraphStartBreaks: boolean
       ): DocumentPageNodeSegment[][] => {
@@ -35459,8 +36199,8 @@ export function DocxEditorViewer({
         renderPageContentHeightScale: estimatedRenderPageContentHeightScale,
       };
     }
-    const splitParagraphComparison = resolveMeasuredSplitParagraphPageComparison(
-      {
+    const splitParagraphComparison =
+      resolveMeasuredSplitParagraphPageComparison({
         canUndo: editor.canUndo,
         canRedo: editor.canRedo,
         hasMeasuredPageContentHeights:
@@ -35470,8 +36210,7 @@ export function DocxEditorViewer({
           buildEstimatedPages(tableMeasuredRowHeightsForPagination, null),
         pageContainsOnlySplitParagraphSegments:
           documentPageContainsOnlySplitParagraphSegments,
-      }
-    );
+      });
     if (splitParagraphComparison.usedPureEstimatedPages) {
       estimatedPages = splitParagraphComparison.pages;
       estimatedPagesUseMeasuredPageContentHeightsForRender = false;
@@ -35680,9 +36419,10 @@ export function DocxEditorViewer({
         targetPageCount: resolvedTargetPageCount,
         hasLastRenderedPageBreakHints,
         renderedBreakHintPageCount,
-        hasMeasuredBodyFooterOverlap: suppressMeasuredBodyFooterOverlapForStoredSinglePage
-          ? false
-          : hasMeasuredBodyFooterOverlap,
+        hasMeasuredBodyFooterOverlap:
+          suppressMeasuredBodyFooterOverlapForStoredSinglePage
+            ? false
+            : hasMeasuredBodyFooterOverlap,
       }) &&
       (!measuredPageHeightOverridesReduceContent ||
         allowMeasuredReductionOverPaginationReconciliation);
@@ -38373,7 +39113,9 @@ export function DocxEditorViewer({
     // the latch from ever releasing an over-compressed plan.
     const storedDocumentPageCountForLatch =
       editor.model.metadata.documentPageCount;
-    const latchTargetPageCount = Number.isFinite(storedDocumentPageCountForLatch)
+    const latchTargetPageCount = Number.isFinite(
+      storedDocumentPageCountForLatch
+    )
       ? Math.max(
           collectDocxHardPageBreakStartNodeIndexes(editor.model).size + 1,
           Math.round(storedDocumentPageCountForLatch as number)
@@ -39108,8 +39850,7 @@ export function DocxEditorViewer({
             targetScreenTop -= tableRectAtStart.height;
           }
           const droppedTopScreenPx =
-            tableRectAtStart.top +
-            (pointerUpEvent.clientY - dragState.startY);
+            tableRectAtStart.top + (pointerUpEvent.clientY - dragState.startY);
           committedTopPx = (droppedTopScreenPx - targetScreenTop) / zoomScale;
         }
         // A negative offset would push the exclusion into the paragraph
@@ -40042,11 +40783,44 @@ export function DocxEditorViewer({
           offset: range.end.offset,
         },
       });
+      commandSelectionGuardRef.current = {
+        range: {
+          start: {
+            location: cloneTextRangeLocation(normalizedRange.start.location),
+            offset: normalizedRange.start.offset,
+          },
+          end: {
+            location: cloneTextRangeLocation(normalizedRange.end.location),
+            offset: normalizedRange.end.offset,
+          },
+        },
+        expiresAt: Date.now() + 500,
+      };
       const isCollapsed =
         compareTextRangeBoundaries(
           normalizedRange.start,
           normalizedRange.end
         ) === 0;
+
+      // Keep the synchronous selection invariant aligned with command-driven
+      // changes. A selectionchange event for the collapse is delivered only
+      // after React has committed; without updating this snapshot now, that
+      // commit can restore the pre-command expanded range and leave deleted
+      // text visibly selected.
+      if (
+        normalizedRange.start.location.kind === "paragraph" &&
+        normalizedRange.end.location.kind === "paragraph" &&
+        normalizedRange.start.location.nodeIndex ===
+          normalizedRange.end.location.nodeIndex
+      ) {
+        pendingEditableCaretRef.current = {
+          nodeIndex: normalizedRange.start.location.nodeIndex,
+          start: Math.max(0, Math.round(normalizedRange.start.offset)),
+          end: Math.max(0, Math.round(normalizedRange.end.offset)),
+        };
+      } else {
+        pendingEditableCaretRef.current = null;
+      }
 
       const applySelection = (attempt: number): void => {
         if (!isSelectionIntentCurrent(selectionIntentNonce)) {
@@ -40067,8 +40841,15 @@ export function DocxEditorViewer({
           const collapsedSelectionReady = Boolean(
             selection && selection.rangeCount > 0 && selection.isCollapsed
           );
-          if (!collapsedSelectionReady && attempt < 4) {
-            selection?.removeAllRanges();
+          const shouldRetry = !collapsedSelectionReady && attempt < 4;
+          // The first call commonly runs before React commits the model
+          // mutation. Re-assert once on the next frame even when the old DOM
+          // accepted the caret, then keep retrying only if the new DOM is not
+          // ready yet.
+          if (attempt === 0 || shouldRetry) {
+            if (!collapsedSelectionReady) {
+              selection?.removeAllRanges();
+            }
             scheduleSelectionIntentFrame(selectionIntentNonce, () => {
               applySelection(attempt + 1);
             });
@@ -40716,10 +41497,11 @@ export function DocxEditorViewer({
   // `selectionchange` handler can observe and persist the destroyed selection),
   // and re-asserts the selection from the authoritative model range whenever the
   // DOM selection has been destroyed. It is deliberately conservative: it never
-  // touches a valid in-host selection (so it cannot fight a real caret), and it
-  // bows out entirely while the user is actively producing input — dragging a
-  // selection (pointer), composing (IME), or typing (keyboard) — where the DOM
-  // is authoritative and the model intentionally lags by one debounced flush.
+  // touches a valid in-host caret/selection or an expanded selection spanning
+  // hosts inside the viewer, and it bows out entirely while the user is
+  // actively producing input — dragging a selection (pointer), composing
+  // (IME), or typing (keyboard) — where the DOM is authoritative and the model
+  // intentionally lags by one debounced flush.
   // Re-asserting during those windows would snap the caret back to the
   // pre-input offset (a freshly typed character would appear without the cursor
   // advancing), so we only restore once the user is idle / after a programmatic
@@ -40772,14 +41554,34 @@ export function DocxEditorViewer({
         focusedHost.contains(liveRange.startContainer) &&
         focusedHost.contains(liveRange.endContainer)
     );
+    const selectionInsideViewer = Boolean(
+      liveRange &&
+        rootElement.contains(liveRange.startContainer) &&
+        rootElement.contains(liveRange.endContainer)
+    );
     const anchorIsElement = Boolean(
       anchorNode && anchorNode.nodeType !== Node.TEXT_NODE
     );
-    const selectionWasDestroyed =
-      !liveRange ||
-      !selectionInsideHost ||
-      (selection.isCollapsed && anchorIsElement);
-    if (!selectionWasDestroyed) {
+    const selectionWasDestroyed = isDomSelectionDestroyed({
+      hasLiveRange: Boolean(liveRange),
+      isCollapsed: selection.isCollapsed,
+      anchorIsElement,
+      rangeInsideFocusedHost: selectionInsideHost,
+      rangeInsideViewer: selectionInsideViewer,
+    });
+    const commandSelectionGuard = commandSelectionGuardRef.current;
+    const guardedRange =
+      commandSelectionGuard && commandSelectionGuard.expiresAt >= Date.now()
+        ? commandSelectionGuard.range
+        : undefined;
+    if (commandSelectionGuard && !guardedRange) {
+      commandSelectionGuardRef.current = undefined;
+    }
+    const guardedSelectionMismatch = Boolean(
+      guardedRange &&
+        !sameTextRange(guardedRange, resolveActiveRangeFromDomSelection())
+    );
+    if (!selectionWasDestroyed && !guardedSelectionMismatch) {
       // The DOM selection is live and valid — leave it alone (this is the
       // normal typing path once React did not need to rewrite innerHTML).
       return;
@@ -40820,7 +41622,7 @@ export function DocxEditorViewer({
     if (session === "keyboard") {
       return;
     }
-    const range = editor.activeTextRange;
+    const range = guardedRange ?? editor.activeTextRange;
     if (!range) {
       return;
     }
@@ -41337,7 +42139,6 @@ export function DocxEditorViewer({
       }
 
       if (restoreRequest.selection.kind === "table-cell") {
-
         const pendingCellElementKey =
           `cell-${restoreRequest.selection.tableIndex}` +
           `-${restoreRequest.selection.rowIndex}` +
@@ -41469,6 +42270,21 @@ export function DocxEditorViewer({
         return;
       }
 
+      // Command handlers update both DOM and model selection explicitly. The
+      // browser can emit a delayed selectionchange for the pre-command range
+      // after React rewrites the paragraph; accepting it here resurrects that
+      // stale expanded range over the newly deleted/replaced text.
+      const commandSelectionGuard = commandSelectionGuardRef.current;
+      if (
+        commandSelectionGuard &&
+        commandSelectionGuard.expiresAt >= Date.now()
+      ) {
+        return;
+      }
+      if (commandSelectionGuard) {
+        commandSelectionGuardRef.current = undefined;
+      }
+
       // Cross-node and table-cell drag selection paths manage DOM + model
       // selection explicitly. Syncing from native selectionchange while dragging
       // can race those updates and cause transient flicker.
@@ -41508,7 +42324,10 @@ export function DocxEditorViewer({
           selectionRange.startContainer.nodeType === Node.TEXT_NODE &&
           selectionRange.endContainer.nodeType === Node.TEXT_NODE
       );
-      if (selectionWithinSingleEditableHost && activeElement instanceof HTMLElement) {
+      if (
+        selectionWithinSingleEditableHost &&
+        activeElement instanceof HTMLElement
+      ) {
         const host = activeElement.closest<HTMLElement>(
           "[data-docx-paragraph-host='true']"
         );
@@ -41543,7 +42362,25 @@ export function DocxEditorViewer({
   }, [flushActiveRangeFromSelection, scheduleDeferredCollapsedSelectionSync]);
 
   React.useEffect(() => {
-    const onPointerDown = (): void => {
+    const onPointerDown = (event: PointerEvent): void => {
+      commandSelectionGuardRef.current = undefined;
+      const rootElement = viewerRootRef.current;
+      const target = event.target;
+      if (
+        rootElement &&
+        target instanceof Node &&
+        !rootElement.contains(target)
+      ) {
+        // External toolbars prevent their pointerdown from moving focus, so
+        // the native document range is still the freshest source of truth at
+        // this point. Capture it before a queued restore or the toolbar click
+        // can read an older controller range.
+        const liveRange = resolveActiveRangeFromDomSelection();
+        if (liveRange) {
+          cancelPendingSelectionIntent();
+          editor.setActiveTextRange(liveRange);
+        }
+      }
       pointerSelectionDragRef.current = { down: true, moved: false };
     };
     const onPointerMove = (event: PointerEvent): void => {
@@ -41562,7 +42399,11 @@ export function DocxEditorViewer({
       window.removeEventListener("pointermove", onPointerMove, true);
       window.removeEventListener("pointerup", onPointerUp, true);
     };
-  }, []);
+  }, [
+    cancelPendingSelectionIntent,
+    editor,
+    resolveActiveRangeFromDomSelection,
+  ]);
 
   const beginCrossNodeSelectionDrag = React.useCallback(
     (
@@ -42106,6 +42947,7 @@ export function DocxEditorViewer({
 
   const onViewerKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>): void => {
+      commandSelectionGuardRef.current = undefined;
       if (!isReadOnly && handleDeleteAcrossTableCellSelection(event)) {
         return;
       }
@@ -44391,19 +45233,13 @@ export function DocxEditorViewer({
           ) {
             const safeStart = Math.max(
               0,
-              Math.min(
-                Math.round(activeRange.start.offset),
-                currentText.length
-              )
+              Math.min(Math.round(activeRange.start.offset), currentText.length)
             );
             selectionOffsets = {
               start: safeStart,
               end: Math.max(
                 safeStart,
-                Math.min(
-                  Math.round(activeRange.end.offset),
-                  currentText.length
-                )
+                Math.min(Math.round(activeRange.end.offset), currentText.length)
               ),
             };
           }
@@ -44789,8 +45625,7 @@ export function DocxEditorViewer({
                 : paragraphText(cellParagraph)
           );
           const mergeBoundaryIndex =
-            effectiveIntent.direction === "backward" &&
-            rangeOffsets.start === 0
+            effectiveIntent.direction === "backward" && rangeOffsets.start === 0
               ? paragraphIndex
               : effectiveIntent.direction === "forward" &&
                 rangeOffsets.start >= currentText.length
@@ -45864,7 +46699,9 @@ export function DocxEditorViewer({
       let latestInlineDropTarget: DocxImageDropTarget | undefined;
       let latestInlineDropTargetKey: string | undefined;
 
-      const measuredBands = ((): FloatingMovePreviewMeasuredBands | undefined => {
+      const measuredBands = (():
+        | FloatingMovePreviewMeasuredBands
+        | undefined => {
         if (!isWrappedFloatingImage || !pageSurface || !pageSurfaceRect) {
           return undefined;
         }
@@ -47317,11 +48154,19 @@ export function DocxEditorViewer({
 
           const textStyle = run.link
             ? {
-                ...linkStyleToCss(run.style, documentContentTheme),
+                ...linkStyleToCss(
+                  run.style,
+                  documentContentTheme,
+                  renderedSlice
+                ),
                 whiteSpace: "pre",
               }
             : {
-                ...runStyleToCss(run.style, documentContentTheme),
+                ...runStyleToCss(
+                  run.style,
+                  documentContentTheme,
+                  renderedSlice
+                ),
                 whiteSpace: "pre",
               };
 
@@ -47331,7 +48176,11 @@ export function DocxEditorViewer({
                 key={`${keyPrefix}-active-${lineIndex}-${run.key}-${overlapStart}`}
                 style={textStyle}
               >
-                {renderedSlice}
+                {scriptFontTextContent(
+                  renderedSlice,
+                  run.style,
+                  `${keyPrefix}-active-${lineIndex}-${run.key}-${overlapStart}`
+                )}
               </span>
             );
           }
@@ -47359,14 +48208,22 @@ export function DocxEditorViewer({
               }}
               style={textStyle}
             >
-              {renderedSlice}
+              {scriptFontTextContent(
+                renderedSlice,
+                run.style,
+                `${keyPrefix}-fragment-${lineIndex}-${run.key}-${overlapStart}`
+              )}
             </a>
           ) : (
             <span
               key={`${keyPrefix}-fragment-${lineIndex}-${run.key}-${overlapStart}`}
               style={textStyle}
             >
-              {renderedSlice}
+              {scriptFontTextContent(
+                renderedSlice,
+                run.style,
+                `${keyPrefix}-fragment-${lineIndex}-${run.key}-${overlapStart}`
+              )}
             </span>
           );
         })
@@ -47758,7 +48615,8 @@ export function DocxEditorViewer({
                   layout.font ??
                   resolveMeasureFont(
                     baseTextStyle,
-                    nextParagraph ? paragraphBaseFontSizePx(nextParagraph) : 16
+                    nextParagraph ? paragraphBaseFontSizePx(nextParagraph) : 16,
+                    currentText
                   );
                 const currentLayout =
                   layout.text === currentText &&
@@ -48000,12 +48858,12 @@ export function DocxEditorViewer({
       keyPrefix: string,
       location: ParagraphLocation,
       options?: {
-    pageFlowTopPx?: number;
-    pageFlowForeignExclusions?: PretextExclusionRect[];
-    pageLayout?: DocumentLayoutMetrics;
-    suppressLikelyFullPageCoverImageKeys?: Set<string>;
-  }
-): React.ReactNode => {
+        pageFlowTopPx?: number;
+        pageFlowForeignExclusions?: PretextExclusionRect[];
+        pageLayout?: DocumentLayoutMetrics;
+        suppressLikelyFullPageCoverImageKeys?: Set<string>;
+      }
+    ): React.ReactNode => {
       const nodes: React.ReactNode[] = [];
       const checkboxChoiceRow = paragraphLooksLikeCheckboxChoiceRow(paragraph);
       const fallbackTabWidthPx = checkboxChoiceRow
@@ -48048,9 +48906,14 @@ export function DocxEditorViewer({
         const shouldControlSoftBreakStretch =
           paragraph.style?.align === "justify" && text.includes("\n");
         if (!shouldControlSoftBreakStretch) {
+          const resolvedStyle = resolveScriptFontCssStyle(
+            style,
+            text,
+            measureStyle
+          );
           nodes.push(
-            <span key={keySeed} style={style}>
-              {text}
+            <span key={keySeed} style={resolvedStyle}>
+              {scriptFontTextContent(text, measureStyle, keySeed)}
             </span>
           );
           trackTextAdvance(text, measureStyle);
@@ -48065,22 +48928,31 @@ export function DocxEditorViewer({
           }
 
           if (segment.length > 0) {
+            const resolvedStyle = resolveScriptFontCssStyle(
+              style,
+              segment,
+              measureStyle
+            );
             nodes.push(
               <span
                 key={`${keySeed}-segment-${segmentIndex}`}
                 style={
                   isLastSegment
                     ? {
-                        ...style,
+                        ...resolvedStyle,
                         display: "inline-block",
                         maxWidth: "100%",
                         whiteSpace: "pre-wrap",
                         verticalAlign: "baseline",
                       }
-                    : style
+                    : resolvedStyle
                 }
               >
-                {segment}
+                {scriptFontTextContent(
+                  segment,
+                  measureStyle,
+                  `${keySeed}-segment-${segmentIndex}`
+                )}
               </span>
             );
           }
@@ -48217,15 +49089,16 @@ export function DocxEditorViewer({
           });
         }
       });
-      const previewParagraph = applyWrappedFloatingInteractionPreviewToParagraph(
-        paragraph,
-        location,
-        paragraphRenderTextWidthPx,
-        {
-          floatingMovePreview,
-          resizePreview,
-        }
-      );
+      const previewParagraph =
+        applyWrappedFloatingInteractionPreviewToParagraph(
+          paragraph,
+          location,
+          paragraphRenderTextWidthPx,
+          {
+            floatingMovePreview,
+            resizePreview,
+          }
+        );
       const anchoredTabLayout = paragraphAnchoredTabLayout(paragraph);
       const useSpecialTabLayout =
         paragraphUsesTabLeaders(paragraph) ||
@@ -48370,11 +49243,11 @@ export function DocxEditorViewer({
 
               const textStyle = run.link
                 ? {
-                    ...linkStyleToCss(run.style, documentContentTheme),
+                    ...linkStyleToCss(run.style, documentContentTheme, slice),
                     whiteSpace: "pre",
                   }
                 : {
-                    ...runStyleToCss(run.style, documentContentTheme),
+                    ...runStyleToCss(run.style, documentContentTheme, slice),
                     whiteSpace: "pre",
                   };
 
@@ -48405,14 +49278,22 @@ export function DocxEditorViewer({
                   }}
                   style={textStyle}
                 >
-                  {slice}
+                  {scriptFontTextContent(
+                    slice,
+                    run.style,
+                    `${keyPrefix}-dual-line-${lineIndex}-${run.key}-${overlapStart}`
+                  )}
                 </a>
               ) : (
                 <span
                   key={`${keyPrefix}-dual-line-${lineIndex}-${run.key}-${overlapStart}`}
                   style={textStyle}
                 >
-                  {slice}
+                  {scriptFontTextContent(
+                    slice,
+                    run.style,
+                    `${keyPrefix}-dual-line-${lineIndex}-${run.key}-${overlapStart}`
+                  )}
                 </span>
               );
             })
@@ -50139,9 +51020,13 @@ export function DocxEditorViewer({
             compactTabStopFieldLayout || child.sourceKind === "legacy";
           const isTextLikeFormField =
             child.fieldType === "text" || child.fieldType === "date";
+          const formFieldText = formFieldDisplayValue(child);
           const inputStyle: React.CSSProperties = {
-            ...runStyleToCss(child.style, documentContentTheme),
-            fontFamily: cssFontFamily(child.style?.fontFamily) ?? "inherit",
+            ...runStyleToCss(child.style, documentContentTheme, formFieldText),
+            fontFamily:
+              cssFontFamily(
+                resolveDocxTextFontFamily(formFieldText, child.style)
+              ) ?? "inherit",
             fontSize: child.style?.fontSizePt
               ? `${child.style.fontSizePt}pt`
               : "inherit",
@@ -50247,15 +51132,17 @@ export function DocxEditorViewer({
                   width: `${checkboxWidthPx}px`,
                   marginInline: 0,
                   lineHeight: "inherit",
-                  fontFamily:
-                    cssFontFamily(child.style?.fontFamily) ?? "inherit",
                   cursor: isReadOnly ? "default" : "pointer",
                   userSelect: "none",
                   outline: "none",
-                  ...runStyleToCss(child.style, documentContentTheme),
+                  ...runStyleToCss(
+                    child.style,
+                    documentContentTheme,
+                    checkboxSymbol
+                  ),
                 }}
               >
-                {checkboxSymbol}
+                {scriptFontTextContent(checkboxSymbol, child.style, runKey)}
               </span>
             );
             trackTextAdvance(checkboxSymbol, child.style);
@@ -50463,12 +51350,16 @@ export function DocxEditorViewer({
               <span
                 key={runKey}
                 style={{
-                  ...runStyleToCss(child.style, documentContentTheme),
+                  ...runStyleToCss(
+                    child.style,
+                    documentContentTheme,
+                    noteLabel
+                  ),
                   verticalAlign: "super",
                   fontSize: "0.75em",
                 }}
               >
-                {noteLabel}
+                {scriptFontTextContent(noteLabel, child.style, runKey)}
               </span>
             );
             trackTextAdvance(noteLabel, child.style);
@@ -50509,9 +51400,13 @@ export function DocxEditorViewer({
                   const bookmarkName = linkHref.slice(1);
                   scrollToBookmark(bookmarkName);
                 }}
-                style={linkStyleToCss(child.style, documentContentTheme)}
+                style={linkStyleToCss(
+                  child.style,
+                  documentContentTheme,
+                  child.text
+                )}
               >
-                {child.text}
+                {scriptFontTextContent(child.text, child.style, runKey)}
               </a>
             );
             trackTextAdvance(child.text, child.style);
@@ -50524,11 +51419,15 @@ export function DocxEditorViewer({
             return;
           }
 
-          const runStyle = runStyleToCss(child.style, documentContentTheme);
           const renderedText = attachTextToPreviousCheckbox(
             paragraph,
             childIndex,
             child.text
+          );
+          const runStyle = runStyleToCss(
+            child.style,
+            documentContentTheme,
+            renderedText
           );
           if (renderedText === "\t") {
             const tabWidthPx = resolveNextTabWidthPx();
@@ -52181,7 +53080,11 @@ export function DocxEditorViewer({
             }
 
             if (selectionIsExpandedWithinElement(event.currentTarget)) {
-              flushActiveRangeFromSelection();
+              // Toolbar controls preserve the native selection on pointerdown.
+              // Commit the mouseup range synchronously so a toolbar click in
+              // the next task cannot observe the previous selection while a
+              // requestAnimationFrame update is still pending.
+              setActiveRangeFromSelection();
               cancelPendingPointerSelectionReconcile();
               return;
             }
@@ -52769,9 +53672,7 @@ export function DocxEditorViewer({
               // Abandoned composition (no `compositionend`): commit the
               // composed DOM once so the model cannot lose it.
               compositionActiveRef.current = false;
-              const composedText = editableTextFromElement(
-                event.currentTarget
-              );
+              const composedText = editableTextFromElement(event.currentTarget);
               if (composedText !== paragraphText(node)) {
                 editor.suppressNextDomSelectionRestore();
                 editor.commitParagraphText(nodeIndex, composedText);
@@ -53639,8 +54540,7 @@ export function DocxEditorViewer({
                                     : spannedWidthPx > 0
                                     ? `${spannedWidthPx}px`
                                     : undefined,
-                                ...(hasCustomCellRowHeight &&
-                                !isSlicedRow
+                                ...(hasCustomCellRowHeight && !isSlicedRow
                                   ? resolvedRowHeightStyle
                                   : undefined),
                                 wordWrap: "break-word",
@@ -54322,9 +55222,10 @@ export function DocxEditorViewer({
                                   }}
                                   onInput={(event) => {
                                     cancelPendingPointerSelectionReconcile();
-                                    const nativeInputEvent = event.nativeEvent as
-                                      | InputEvent
-                                      | undefined;
+                                    const nativeInputEvent =
+                                      event.nativeEvent as
+                                        | InputEvent
+                                        | undefined;
                                     if (
                                       nativeInputEvent?.isComposing ||
                                       compositionActiveRef.current
@@ -54364,7 +55265,8 @@ export function DocxEditorViewer({
                                       context.paragraphElement
                                     );
                                     if (
-                                      domText === paragraphText(contextParagraph)
+                                      domText ===
+                                      paragraphText(contextParagraph)
                                     ) {
                                       return;
                                     }
@@ -54400,7 +55302,8 @@ export function DocxEditorViewer({
                                       },
                                       domText,
                                       {
-                                        start: typedOffsets?.start ?? caretOffset,
+                                        start:
+                                          typedOffsets?.start ?? caretOffset,
                                         end: caretOffset,
                                       }
                                     );
@@ -55079,8 +55982,8 @@ export function DocxEditorViewer({
                                     // Without the clip the row balloons to fit
                                     // content (height on a <tr>/<td> is only
                                     // ever a minimum).
-                                    ...(exactRowSpanClipHeightPx !== undefined &&
-                                    !isSlicedRow
+                                    ...(exactRowSpanClipHeightPx !==
+                                      undefined && !isSlicedRow
                                       ? {
                                           maxHeight: `${exactRowSpanClipHeightPx}px`,
                                           overflow: "hidden",
@@ -57284,9 +58187,8 @@ export function DocxEditorViewer({
                           previousColumns &&
                           nextColumns &&
                           previousColumns.count === nextColumns.count &&
-                          Math.abs(
-                            previousColumns.gapPx - nextColumns.gapPx
-                          ) <= 2 &&
+                          Math.abs(previousColumns.gapPx - nextColumns.gapPx) <=
+                            2 &&
                           JSON.stringify(previousColumns.widthsPx ?? null) ===
                             JSON.stringify(nextColumns.widthsPx ?? null);
                         if (sameGeometry) {
@@ -58597,7 +59499,7 @@ export function DocxEditorViewer({
                     left: TRACKED_CHANGE_GUTTER_CARD_LEFT_PX,
                     width: cardWidthPx,
                     minHeight: entry.heightPx,
-                    pointerEvents: "none",
+                    pointerEvents: "auto",
                   };
                   const cardStyle: React.CSSProperties = {
                     width: "100%",
@@ -58700,6 +59602,71 @@ export function DocxEditorViewer({
                       >
                         <strong>{kindLabel}:</strong> {snippet}
                       </p>
+                      {trackedChange?.revisionId &&
+                      trackedChange.location.kind === "paragraph" &&
+                      (trackedChange.kind === "insertion" ||
+                        trackedChange.kind === "deletion") ? (
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 4,
+                            marginTop: 4,
+                          }}
+                        >
+                          {(["Accept", "Reject"] as const).map((label) => (
+                            <button
+                              key={label}
+                              type="button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                if (label === "Accept") {
+                                  editor.acceptTrackedChange(trackedChange);
+                                } else {
+                                  editor.rejectTrackedChange(trackedChange);
+                                }
+                              }}
+                              style={{
+                                border: `1px solid ${accentColor}`,
+                                borderRadius: 3,
+                                padding: "1px 5px",
+                                background: "transparent",
+                                color: "inherit",
+                                font: "inherit",
+                                fontSize: 9,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : comment ? (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            editor.setCommentResolved(
+                              comment,
+                              !comment.resolved
+                            );
+                          }}
+                          style={{
+                            marginTop: 4,
+                            border: `1px solid ${accentColor}`,
+                            borderRadius: 3,
+                            padding: "1px 5px",
+                            background: "transparent",
+                            color: "inherit",
+                            font: "inherit",
+                            fontSize: 9,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {comment.resolved ? "Reopen" : "Resolve"}
+                        </button>
+                      ) : null}
                     </div>
                   );
                   const renderedCard = trackedChange
@@ -58713,6 +59680,10 @@ export function DocxEditorViewer({
                           documentTheme: editor.documentTheme,
                           pageIndex,
                           style: cardStyle,
+                          accept: () =>
+                            editor.acceptTrackedChange(trackedChange),
+                          reject: () =>
+                            editor.rejectTrackedChange(trackedChange),
                         })
                       : defaultCard
                     : comment && renderCommentCard
@@ -58724,6 +59695,8 @@ export function DocxEditorViewer({
                         documentTheme: editor.documentTheme,
                         pageIndex,
                         style: cardStyle,
+                        setResolved: (resolved) =>
+                          editor.setCommentResolved(comment, resolved),
                       })
                     : defaultCard;
                   return (

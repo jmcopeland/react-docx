@@ -12,7 +12,7 @@ import {
   updateParagraphText,
   updateTableCellParagraphTextRecursive,
   updateTableCellParagraphText,
-  updateTableCellText
+  updateTableCellText,
 } from "@extend-ai/react-docx-editor-ops";
 
 function sampleModel(): DocModel {
@@ -20,12 +20,12 @@ function sampleModel(): DocModel {
     nodes: [
       {
         type: "paragraph",
-        children: [{ type: "text", text: "First paragraph" }]
+        children: [{ type: "text", text: "First paragraph" }],
       },
       {
         type: "paragraph",
-        children: [{ type: "text", text: "Second paragraph" }]
-      }
+        children: [{ type: "text", text: "Second paragraph" }],
+      },
     ],
     metadata: {
       sourceParts: 1,
@@ -33,8 +33,8 @@ function sampleModel(): DocModel {
       headerSections: [],
       footerSections: [],
       paragraphStyles: [],
-      defaultParagraphStyleId: "Normal"
-    }
+      defaultParagraphStyleId: "Normal",
+    },
   };
 }
 
@@ -82,15 +82,19 @@ describe("editor-ops", () => {
                       type: "paragraph",
                       children: [
                         { type: "text", text: "Name:", style: { bold: true } },
-                        { type: "text", text: " Click here.", style: { italic: true } }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                        {
+                          type: "text",
+                          text: " Click here.",
+                          style: { italic: true },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -98,8 +102,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateTableCellText(model, 0, 0, 0, "Name: Andrew");
@@ -108,8 +112,16 @@ describe("editor-ops", () => {
 
     const runs = table.rows[0].cells[0].nodes[0].children;
     expect(runs).toHaveLength(2);
-    expect(runs[0]).toMatchObject({ type: "text", text: "Name:", style: { bold: true } });
-    expect(runs[1]).toMatchObject({ type: "text", text: " Andrew", style: { italic: true } });
+    expect(runs[0]).toMatchObject({
+      type: "text",
+      text: "Name:",
+      style: { bold: true },
+    });
+    expect(runs[1]).toMatchObject({
+      type: "text",
+      text: " Andrew",
+      style: { italic: true },
+    });
   });
 
   it("updates the targeted paragraph inside a table cell", () => {
@@ -126,21 +138,35 @@ describe("editor-ops", () => {
                   nodes: [
                     {
                       type: "paragraph",
-                      children: [{ type: "text", text: "Top line", style: { bold: true } }]
+                      children: [
+                        {
+                          type: "text",
+                          text: "Top line",
+                          style: { bold: true },
+                        },
+                      ],
                     },
                     {
                       type: "paragraph",
                       children: [
-                        { type: "text", text: "Second:", style: { italic: true } },
-                        { type: "text", text: " value", style: { underline: true } }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                        {
+                          type: "text",
+                          text: "Second:",
+                          style: { italic: true },
+                        },
+                        {
+                          type: "text",
+                          text: " value",
+                          style: { underline: true },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -148,11 +174,18 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
-    const edited = updateTableCellParagraphText(model, 0, 0, 0, 1, "Second: updated");
+    const edited = updateTableCellParagraphText(
+      model,
+      0,
+      0,
+      0,
+      1,
+      "Second: updated"
+    );
     const table = edited.nodes[0];
     expect(table.type).toBe("table");
     if (table.type !== "table") {
@@ -160,16 +193,20 @@ describe("editor-ops", () => {
     }
 
     const paragraphs = table.rows[0].cells[0].nodes;
-    expect(paragraphs[0].children[0]).toMatchObject({ type: "text", text: "Top line", style: { bold: true } });
+    expect(paragraphs[0].children[0]).toMatchObject({
+      type: "text",
+      text: "Top line",
+      style: { bold: true },
+    });
     expect(paragraphs[1].children[0]).toMatchObject({
       type: "text",
       text: "Second:",
-      style: { italic: true }
+      style: { italic: true },
     });
     expect(paragraphs[1].children[1]).toMatchObject({
       type: "text",
       text: " updated",
-      style: { underline: true }
+      style: { underline: true },
     });
   });
 
@@ -184,11 +221,15 @@ describe("editor-ops", () => {
               type: "image",
               src: "data:image/png;base64,abc",
               widthPx: 64,
-              heightPx: 64
+              heightPx: 64,
+              sourceXml: "<w:r><w:drawing/></w:r>",
+              crop: { leftFraction: 0.1, rightFraction: 0.2 },
+              cssFilter: "grayscale(1)",
+              cssOpacity: 0.75,
             },
-            { type: "text", text: " after" }
-          ]
-        }
+            { type: "text", text: " after" },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -196,8 +237,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateParagraphText(model, 0, "Before inserted after");
@@ -208,9 +249,23 @@ describe("editor-ops", () => {
     }
 
     expect(paragraph.children).toHaveLength(3);
-    expect(paragraph.children[0]).toMatchObject({ type: "text", text: "Before inserted" });
-    expect(paragraph.children[1]).toMatchObject({ type: "image", widthPx: 64, heightPx: 64 });
-    expect(paragraph.children[2]).toMatchObject({ type: "text", text: " after" });
+    expect(paragraph.children[0]).toMatchObject({
+      type: "text",
+      text: "Before inserted",
+    });
+    expect(paragraph.children[1]).toMatchObject({
+      type: "image",
+      widthPx: 64,
+      heightPx: 64,
+      sourceXml: "<w:r><w:drawing/></w:r>",
+      crop: { leftFraction: 0.1, rightFraction: 0.2 },
+      cssFilter: "grayscale(1)",
+      cssOpacity: 0.75,
+    });
+    expect(paragraph.children[2]).toMatchObject({
+      type: "text",
+      text: " after",
+    });
   });
 
   it("updates all table-cell paragraphs without duplicating text into the first paragraph", () => {
@@ -227,18 +282,30 @@ describe("editor-ops", () => {
                   nodes: [
                     {
                       type: "paragraph",
-                      children: [{ type: "text", text: "Phone: 123", style: { bold: true } }]
+                      children: [
+                        {
+                          type: "text",
+                          text: "Phone: 123",
+                          style: { bold: true },
+                        },
+                      ],
                     },
                     {
                       type: "paragraph",
-                      children: [{ type: "text", text: "Email: old@example.com", style: { italic: true } }]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                      children: [
+                        {
+                          type: "text",
+                          text: "Email: old@example.com",
+                          style: { italic: true },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -246,8 +313,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateTableCellText(
@@ -266,19 +333,22 @@ describe("editor-ops", () => {
     const paragraphs = table.rows[0].cells[0].nodes;
     expect(paragraphs[0].type).toBe("paragraph");
     expect(paragraphs[1].type).toBe("paragraph");
-    if (paragraphs[0].type !== "paragraph" || paragraphs[1].type !== "paragraph") {
+    if (
+      paragraphs[0].type !== "paragraph" ||
+      paragraphs[1].type !== "paragraph"
+    ) {
       return;
     }
 
     expect(paragraphs[0].children[0]).toMatchObject({
       type: "text",
       text: "Phone: 123",
-      style: { bold: true }
+      style: { bold: true },
     });
     expect(paragraphs[1].children[0]).toMatchObject({
       type: "text",
       text: "Email: new@example.com",
-      style: { italic: true }
+      style: { italic: true },
     });
   });
 
@@ -296,14 +366,14 @@ describe("editor-ops", () => {
                   nodes: [
                     {
                       type: "paragraph",
-                      children: [{ type: "text", text: "Line 1" }]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                      children: [{ type: "text", text: "Line 1" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -311,8 +381,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateTableCellText(model, 0, 0, 0, "Line 1\n\n");
@@ -327,11 +397,18 @@ describe("editor-ops", () => {
     expect(paragraphs[0].type).toBe("paragraph");
     expect(paragraphs[1].type).toBe("paragraph");
     expect(paragraphs[2].type).toBe("paragraph");
-    if (paragraphs[0].type !== "paragraph" || paragraphs[1].type !== "paragraph" || paragraphs[2].type !== "paragraph") {
+    if (
+      paragraphs[0].type !== "paragraph" ||
+      paragraphs[1].type !== "paragraph" ||
+      paragraphs[2].type !== "paragraph"
+    ) {
       return;
     }
 
-    expect(paragraphs[0].children[0]).toMatchObject({ type: "text", text: "Line 1" });
+    expect(paragraphs[0].children[0]).toMatchObject({
+      type: "text",
+      text: "Line 1",
+    });
     expect(paragraphs[1].children[0]).toMatchObject({ type: "text", text: "" });
     expect(paragraphs[2].children[0]).toMatchObject({ type: "text", text: "" });
   });
@@ -359,9 +436,15 @@ describe("editor-ops", () => {
                               nodes: [
                                 {
                                   type: "paragraph",
-                                  children: [{ type: "text", text: "Label", style: { bold: true } }]
-                                }
-                              ]
+                                  children: [
+                                    {
+                                      type: "text",
+                                      text: "Label",
+                                      style: { bold: true },
+                                    },
+                                  ],
+                                },
+                              ],
                             },
                             {
                               type: "table-cell",
@@ -369,22 +452,30 @@ describe("editor-ops", () => {
                                 {
                                   type: "paragraph",
                                   children: [
-                                    { type: "text", text: "Value:", style: { italic: true } },
-                                    { type: "text", text: " old", style: { underline: true } }
-                                  ]
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                                    {
+                                      type: "text",
+                                      text: "Value:",
+                                      style: { italic: true },
+                                    },
+                                    {
+                                      type: "text",
+                                      text: " old",
+                                      style: { underline: true },
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -392,11 +483,18 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
-    const edited = updateTableCellParagraphTextRecursive(model, 0, 0, 0, 1, "Value: updated");
+    const edited = updateTableCellParagraphTextRecursive(
+      model,
+      0,
+      0,
+      0,
+      1,
+      "Value: updated"
+    );
     const table = edited.nodes[0];
     expect(table.type).toBe("table");
     if (table.type !== "table") {
@@ -413,24 +511,29 @@ describe("editor-ops", () => {
     const rightParagraph = nestedTable.rows[0].cells[1].nodes[0];
     expect(leftParagraph?.type).toBe("paragraph");
     expect(rightParagraph?.type).toBe("paragraph");
-    if (!leftParagraph || leftParagraph.type !== "paragraph" || !rightParagraph || rightParagraph.type !== "paragraph") {
+    if (
+      !leftParagraph ||
+      leftParagraph.type !== "paragraph" ||
+      !rightParagraph ||
+      rightParagraph.type !== "paragraph"
+    ) {
       return;
     }
 
     expect(leftParagraph.children[0]).toMatchObject({
       type: "text",
       text: "Label",
-      style: { bold: true }
+      style: { bold: true },
     });
     expect(rightParagraph.children[0]).toMatchObject({
       type: "text",
       text: "Value:",
-      style: { italic: true }
+      style: { italic: true },
     });
     expect(rightParagraph.children[1]).toMatchObject({
       type: "text",
       text: " updated",
-      style: { underline: true }
+      style: { underline: true },
     });
   });
 
@@ -445,11 +548,11 @@ describe("editor-ops", () => {
               fieldType: "checkbox",
               checked: false,
               checkedSymbol: "☒",
-              uncheckedSymbol: "☐"
+              uncheckedSymbol: "☐",
             },
-            { type: "text", text: " Female", style: { bold: true } }
-          ]
-        }
+            { type: "text", text: " Female", style: { bold: true } },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -457,8 +560,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateParagraphText(model, 0, "☐ Female updated");
@@ -471,12 +574,12 @@ describe("editor-ops", () => {
     expect(paragraph.children[0]).toMatchObject({
       type: "form-field",
       fieldType: "checkbox",
-      checked: false
+      checked: false,
     });
     expect(paragraph.children[1]).toMatchObject({
       type: "text",
       text: " Female updated",
-      style: { bold: true }
+      style: { bold: true },
     });
   });
 
@@ -500,17 +603,17 @@ describe("editor-ops", () => {
                           fieldType: "checkbox",
                           checked: false,
                           checkedSymbol: "☒",
-                          uncheckedSymbol: "☐"
+                          uncheckedSymbol: "☐",
                         },
-                        { type: "text", text: " Yes", style: { italic: true } }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+                        { type: "text", text: " Yes", style: { italic: true } },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       ],
       metadata: {
         sourceParts: 1,
@@ -518,8 +621,8 @@ describe("editor-ops", () => {
         headerSections: [],
         footerSections: [],
         paragraphStyles: [],
-        defaultParagraphStyleId: "Normal"
-      }
+        defaultParagraphStyleId: "Normal",
+      },
     };
 
     const edited = updateTableCellText(model, 0, 0, 0, "☐ Yes (selected)");
@@ -533,12 +636,12 @@ describe("editor-ops", () => {
     expect(children[0]).toMatchObject({
       type: "form-field",
       fieldType: "checkbox",
-      checked: false
+      checked: false,
     });
     expect(children[1]).toMatchObject({
       type: "text",
       text: " Yes (selected)",
-      style: { italic: true }
+      style: { italic: true },
     });
   });
 
@@ -556,12 +659,20 @@ describe("editor-ops", () => {
             horizontalRelativeTo: "margin",
             verticalRelativeTo: "margin",
             xPx: 139,
-            yPx: 381
-          }
+            yPx: 381,
+          },
         },
-        { type: "text", text: "Generally, it is not possible ", style: { italic: true } },
-        { type: "text", text: "to edit around this arrow.", style: { bold: true } }
-      ]
+        {
+          type: "text",
+          text: "Generally, it is not possible ",
+          style: { italic: true },
+        },
+        {
+          type: "text",
+          text: "to edit around this arrow.",
+          style: { bold: true },
+        },
+      ],
     };
 
     if (paragraph.type !== "paragraph") {
@@ -577,9 +688,19 @@ describe("editor-ops", () => {
 
     expect(split.beforeChildren[0]).toMatchObject({
       type: "image",
-      alt: "forward.png"
+      alt: "forward.png",
     });
-    expect(split.beforeChildren.some((child) => child.type === "text" && child.text.includes("Generally"))).toBe(true);
-    expect(split.afterChildren.some((child) => child.type === "text" && child.text.includes("to edit around this arrow."))).toBe(true);
+    expect(
+      split.beforeChildren.some(
+        (child) => child.type === "text" && child.text.includes("Generally")
+      )
+    ).toBe(true);
+    expect(
+      split.afterChildren.some(
+        (child) =>
+          child.type === "text" &&
+          child.text.includes("to edit around this arrow.")
+      )
+    ).toBe(true);
   });
 });

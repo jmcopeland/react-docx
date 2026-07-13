@@ -19,7 +19,34 @@ export interface TextStyle {
   highlight?: string;
   backgroundColor?: string;
   fontSizePt?: number;
+  /** Resolved single-family fallback retained for backwards compatibility. */
   fontFamily?: string;
+  /** @internal Import-time fallback used to detect fontFamily edits. */
+  sourceFontFamily?: string;
+  /** Explicit OOXML w:rFonts slots. */
+  fontFamilyAscii?: string;
+  fontFamilyHAnsi?: string;
+  fontFamilyEastAsia?: string;
+  fontFamilyCs?: string;
+  fontThemeAscii?: string;
+  fontThemeHAnsi?: string;
+  fontThemeEastAsia?: string;
+  fontThemeCs?: string;
+  /** @internal Concrete families resolved from the document theme per slot. */
+  resolvedFontFamilyAscii?: string;
+  /** @internal Concrete families resolved from the document theme per slot. */
+  resolvedFontFamilyHAnsi?: string;
+  /** @internal Concrete families resolved from the document theme per slot. */
+  resolvedFontFamilyEastAsia?: string;
+  /** @internal Concrete families resolved from the document theme per slot. */
+  resolvedFontFamilyCs?: string;
+  fontHint?: string;
+  /** OOXML w:lang slots and complex-script direction controls. */
+  language?: string;
+  languageEastAsia?: string;
+  languageBidi?: string;
+  rightToLeft?: boolean;
+  complexScript?: boolean;
   characterSpacingTwips?: number;
   verticalAlign?: "superscript" | "subscript";
   runBorder?: TextRunBorderStyle;
@@ -217,6 +244,22 @@ export interface ParagraphNode {
   style?: ParagraphStyle;
   paragraphMarkDeleted?: boolean;
   sourceXml?: string;
+  /** @internal Validated provenance for a surgical plain-text sourceXml patch. */
+  sourceTextPatch?: {
+    runs: Array<{
+      style?: TextStyle;
+      link?: string;
+      noteReference?: TextRunNode["noteReference"];
+    }>;
+  };
+  /** @internal Immutable import-time run metadata used by surgical editors. */
+  sourceRunProvenance?: {
+    runs: Array<{
+      style?: TextStyle;
+      link?: string;
+      noteReference?: TextRunNode["noteReference"];
+    }>;
+  };
 }
 
 export interface TableBoxSpacing {
@@ -305,6 +348,11 @@ export interface TableNode {
   rows: TableRowNode[];
   style?: TableStyle;
   sourceXml?: string;
+  /** @internal Validated text-only descendant replacements for sourceXml. */
+  sourceTextPatches?: Array<{
+    sourceParagraphXml: string;
+    paragraph: ParagraphNode;
+  }>;
 }
 
 export type DocNode = ParagraphNode | TableNode;
@@ -408,6 +456,16 @@ export interface DocumentCommentDefinition {
   parentId?: number;
   /** True when the comment thread is marked done in commentsExtended. */
   resolved?: boolean;
+  /** @internal Original `w:comment` block retained for lossless serialization. */
+  sourceXml?: string;
+  /** @internal Final comment paragraph id used by `commentsExtended.xml`. */
+  extendedParagraphId?: string;
+  /** @internal Resolution state read from `commentsExtended.xml`. */
+  sourceResolved?: boolean;
+  /** @internal True when `resolved` differs from the imported state. */
+  resolutionDirty?: boolean;
+  /** @internal True for a comment created in the editor rather than imported. */
+  isNew?: boolean;
 }
 
 export interface DocumentCompatibilitySettings {

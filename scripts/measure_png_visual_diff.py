@@ -17,8 +17,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("pairs_manifest", help="JSON file containing image comparison pairs.")
     parser.add_argument("output_json", help="Path to write comparison metrics JSON.")
-    parser.add_argument("--width", type=int, default=396, help="Normalized comparison width.")
-    parser.add_argument("--height", type=int, default=560, help="Normalized comparison height.")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=816,
+        help="Normalized comparison width (defaults to a 96-DPI US Letter page).",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=1056,
+        help="Normalized comparison height (defaults to a 96-DPI US Letter page).",
+    )
     parser.add_argument(
         "--ink-threshold",
         type=int,

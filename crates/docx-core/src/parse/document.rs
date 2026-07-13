@@ -76,6 +76,8 @@ pub fn parse_document_xml(document_xml: &str, context: &ParseContext<'_>) -> Vec
             style: None,
             paragraph_mark_deleted: None,
             source_xml: None,
+            source_text_patch: None,
+            source_run_provenance: None,
         }));
     }
 

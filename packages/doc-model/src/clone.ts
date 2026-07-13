@@ -18,6 +18,7 @@ import type {
   TableCellContentNode,
   TableNode,
   TableStyle,
+  TextStyle,
 } from "./types";
 
 function isParagraphCellContent(
@@ -110,6 +111,15 @@ function cloneParagraphStyle(
   };
 }
 
+function cloneTextStyle(style?: TextStyle): TextStyle | undefined {
+  return style
+    ? {
+        ...style,
+        runBorder: style.runBorder ? { ...style.runBorder } : undefined,
+      }
+    : undefined;
+}
+
 export function cloneParagraphNode(paragraph: ParagraphNode): ParagraphNode {
   return cloneParagraph(paragraph);
 }
@@ -125,13 +135,38 @@ function cloneParagraph(paragraph: ParagraphNode): ParagraphNode {
     style: cloneParagraphStyle(paragraph.style),
     paragraphMarkDeleted: paragraph.paragraphMarkDeleted,
     sourceXml: paragraph.sourceXml,
+    sourceTextPatch: paragraph.sourceTextPatch
+      ? {
+          runs: paragraph.sourceTextPatch.runs.map((run) => ({
+            style: cloneTextStyle(run.style),
+            link: run.link,
+            noteReference: run.noteReference
+              ? { ...run.noteReference }
+              : undefined,
+          })),
+        }
+      : undefined,
+    sourceRunProvenance: paragraph.sourceRunProvenance
+      ? {
+          runs: paragraph.sourceRunProvenance.runs.map((run) => ({
+            style: cloneTextStyle(run.style),
+            link: run.link,
+            noteReference: run.noteReference
+              ? { ...run.noteReference }
+              : undefined,
+          })),
+        }
+      : undefined,
     children: paragraph.children.map((child) => {
       if (child.type === "text") {
         return {
           type: "text" as const,
           text: child.text,
-          style: child.style ? { ...child.style } : undefined,
+          style: cloneTextStyle(child.style),
           link: child.link,
+          noteReference: child.noteReference
+            ? { ...child.noteReference }
+            : undefined,
         };
       }
 
@@ -280,6 +315,10 @@ function cloneTable(table: TableNode): TableNode {
     type: "table",
     blockId: table.blockId,
     sourceXml: table.sourceXml,
+    sourceTextPatches: table.sourceTextPatches?.map((patch) => ({
+      sourceParagraphXml: patch.sourceParagraphXml,
+      paragraph: cloneParagraph(patch.paragraph),
+    })),
     style: table.style
       ? {
           widthTwips: table.style.widthTwips,

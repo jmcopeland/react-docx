@@ -22,14 +22,49 @@ function printUsage() {
   pnpm run test:docx-vs-libreoffice -- --corpus-dir <path>
 
 Options:
-  --docx <path>        DOCX file to verify. Can be repeated.
-  --corpus-dir <path>  Directory scanned recursively for .docx files.
-                       Defaults to DOCX_FIDELITY_CORPUS_DIR or tests/fixtures/docx-regression-local.
-  --base-url <url>     Running playground URL. Defaults to DOCX_FIDELITY_BASE_URL or http://localhost:5177/.
+  --docx <path>                       DOCX file to verify. Can be repeated.
+  --corpus-dir <path>                 Directory scanned recursively for .docx files.
+                                      Defaults to DOCX_FIDELITY_CORPUS_DIR or tests/fixtures/docx-regression-local.
+  --base-url <url>                    Running playground URL. Defaults to DOCX_FIDELITY_BASE_URL or http://localhost:5177/.
+  --max-page-count-delta <count>      Allowed absolute page-count delta per document. Defaults to 0.
+  --max-footer-overlap-pages <count>  Allowed footer-overlap pages per document. Defaults to 0.
+  --report-only                       Print failures without returning a nonzero exit code.
 
 Environment:
-  SOFFICE_BIN          LibreOffice executable override.
-  PDFINFO_BIN          pdfinfo executable override.`);
+  DOCX_FIDELITY_MAX_PAGE_COUNT_DELTA      Default for --max-page-count-delta.
+  DOCX_FIDELITY_MAX_FOOTER_OVERLAP_PAGES  Default for --max-footer-overlap-pages.
+  DOCX_FIDELITY_REPORT_ONLY               Set to 1 or true to enable report-only mode.
+  SOFFICE_BIN                             LibreOffice executable override.
+  PDFINFO_BIN                             pdfinfo executable override.`);
+}
+
+function parseNonNegativeInteger(value, optionName) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${optionName} must be a non-negative integer.`);
+  }
+  return parsed;
+}
+
+function parseBoolean(value, optionName, fallback = false) {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  switch (value.trim().toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      throw new Error(`${optionName} must be a boolean value.`);
+  }
 }
 
 function parseArgs(argv) {
@@ -37,6 +72,18 @@ function parseArgs(argv) {
     docxPaths: [],
     corpusDir: process.env.DOCX_FIDELITY_CORPUS_DIR || defaultCorpusDir,
     baseUrl: process.env.DOCX_FIDELITY_BASE_URL || "http://localhost:5177/",
+    maxPageCountDelta: parseNonNegativeInteger(
+      process.env.DOCX_FIDELITY_MAX_PAGE_COUNT_DELTA ?? "0",
+      "DOCX_FIDELITY_MAX_PAGE_COUNT_DELTA"
+    ),
+    maxFooterOverlapPages: parseNonNegativeInteger(
+      process.env.DOCX_FIDELITY_MAX_FOOTER_OVERLAP_PAGES ?? "0",
+      "DOCX_FIDELITY_MAX_FOOTER_OVERLAP_PAGES"
+    ),
+    reportOnly: parseBoolean(
+      process.env.DOCX_FIDELITY_REPORT_ONLY,
+      "DOCX_FIDELITY_REPORT_ONLY"
+    ),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -53,6 +100,23 @@ function parseArgs(argv) {
       case "--base-url":
         options.baseUrl = argv[index + 1] ?? options.baseUrl;
         index += 1;
+        break;
+      case "--max-page-count-delta":
+        options.maxPageCountDelta = parseNonNegativeInteger(
+          argv[index + 1],
+          "--max-page-count-delta"
+        );
+        index += 1;
+        break;
+      case "--max-footer-overlap-pages":
+        options.maxFooterOverlapPages = parseNonNegativeInteger(
+          argv[index + 1],
+          "--max-footer-overlap-pages"
+        );
+        index += 1;
+        break;
+      case "--report-only":
+        options.reportOnly = true;
         break;
       case "--help":
       case "-h":
@@ -212,7 +276,48 @@ async function main() {
           basename,
           { timeout: 120_000 }
         );
-        await page.waitForTimeout(1200);
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await Promise.all(
+            Array.from(document.images)
+              .filter((image) => !image.complete)
+              .map((image) => image.decode().catch(() => undefined))
+          );
+
+          const layoutSignature = () =>
+            Array.from(document.querySelectorAll("[data-docx-page-index]"))
+              .map((element) => {
+                const rect = element.getBoundingClientRect();
+                return [
+                  element.getAttribute("data-docx-page-index"),
+                  rect.width.toFixed(3),
+                  rect.height.toFixed(3),
+                  element.scrollWidth,
+                  element.scrollHeight,
+                  element.querySelectorAll('[data-docx-paragraph-host="true"]')
+                    .length,
+                ].join(":");
+              })
+              .join("|");
+
+          const deadline = performance.now() + 20_000;
+          let previousSignature = "";
+          let stableFrames = 0;
+          while (stableFrames < 4) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            const signature = layoutSignature();
+            stableFrames =
+              signature.length > 0 && signature === previousSignature
+                ? stableFrames + 1
+                : 0;
+            previousSignature = signature;
+            if (performance.now() > deadline) {
+              throw new Error(
+                "DOCX page geometry did not stabilize within 20 seconds"
+              );
+            }
+          }
+        });
         const importMs = Date.now() - startedAt;
         const metrics = await page.evaluate(() => {
           const pageEls = Array.from(
@@ -269,11 +374,27 @@ async function main() {
     0
   );
   const totalImportMs = results.reduce((sum, item) => sum + item.importMs, 0);
-  const docsFailed = results.filter(
-    (item) =>
-      Math.abs(item.viewerPageCount - item.librePageCount) > 0 ||
-      item.footerOverlapPages > 0
-  ).length;
+  const assessedResults = results.map((item) => {
+    const pageCountDelta = Math.abs(item.viewerPageCount - item.librePageCount);
+    const failures = [];
+    if (pageCountDelta > options.maxPageCountDelta) {
+      failures.push(
+        `page-count delta ${pageCountDelta} exceeds ${options.maxPageCountDelta}`
+      );
+    }
+    if (item.footerOverlapPages > options.maxFooterOverlapPages) {
+      failures.push(
+        `footer-overlap pages ${item.footerOverlapPages} exceeds ${options.maxFooterOverlapPages}`
+      );
+    }
+    return {
+      ...item,
+      pageCountDelta,
+      passed: failures.length === 0,
+      failures,
+    };
+  });
+  const docsFailed = assessedResults.filter((item) => !item.passed).length;
 
   console.log(
     JSON.stringify(
@@ -283,12 +404,29 @@ async function main() {
         footer_overlap_pages: footerOverlapPages,
         total_import_ms: totalImportMs,
         docs_failed: docsFailed,
-        results,
+        thresholds: {
+          max_page_count_delta_per_doc: options.maxPageCountDelta,
+          max_footer_overlap_pages_per_doc: options.maxFooterOverlapPages,
+        },
+        report_only: options.reportOnly,
+        results: assessedResults,
       },
       null,
       2
     )
   );
+
+  if (docsFailed > 0) {
+    const message = `DOCX fidelity thresholds failed for ${docsFailed} of ${results.length} document(s).`;
+    if (options.reportOnly) {
+      console.warn(`${message} Report-only mode is enabled.`);
+    } else {
+      console.error(
+        `${message} Re-run with --report-only to suppress this failure.`
+      );
+      process.exitCode = 1;
+    }
+  }
 }
 
 main().catch((error) => {
